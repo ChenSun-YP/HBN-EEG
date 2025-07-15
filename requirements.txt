@@ -1,5 +1,5 @@
-# Core Dependencies for EEG Foundation Challenge
-# Updated for 2025 EEG Foundation Challenge: From Cross-Task to Cross-Subject EEG Decoding
+# Core Dependencies for EEG Foundation Challenge 2025
+# Challenge 1: Cross-Task Transfer Learning with Per-Trial Approach
 
 # Deep Learning Frameworks
 torch>=2.0.0
@@ -47,7 +47,6 @@ accelerate>=0.25.0
 
 # Cross-validation & Metrics
 torchmetrics>=0.11.0
-scikit-learn>=1.3.0
 
 # Competition Specific
 kaggle>=1.6.0  # For potential submission system
@@ -60,10 +59,8 @@ ipython>=8.0.0
 black>=23.0.0
 isort>=5.12.0
 
-# Optional GPU acceleration
-# Uncomment if using CUDA
-# nvidia-ml-py>=12.0.0
-
 # Memory optimization
 memory-profiler>=0.61.0
-psutil>=5.9.0 
+psutil>=5.9.0
+pathlib2>=2.3.7
+typing-extensions>=4.0.0
