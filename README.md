@@ -1,385 +1,362 @@
-# EEG Foundation Challenge: EEGPT-Style Foundation Model
+# EEG Foundation Challenge 2025 - Challenge 1: Cross-Task Transfer Learning
 
-## Overview
-This project implements a comprehensive foundation model for the 2025 EEG Foundation Challenge using EEGPT-style patch-based tokenization. Our approach treats EEG signals like vision transformers treat images, converting continuous neural signals into discrete temporal patches for transformer-based processing.
+## Challenge Overview
 
-## 🎯 Challenge Overview
+This repository implements **Challenge 1: Cross-Task Transfer Learning** from the [EEG Foundation Challenge 2025](https://arxiv.org/pdf/2506.19141). The challenge focuses on predicting behavioral outcomes from EEG data using a cross-task transfer learning approach.
 
-### **Challenge 1: Cross-Task Transfer Learning**
-- **Source Domain**: Surround Suppression task (passive visual task)
-- **Target Domain**: Contrast Change Detection task (active attention task)
-- **Goal**: Train foundation model on SuS, then fine-tune/evaluate on CCD performance
-- **Metric**: Behavioral performance correlation
+### Official Challenge Constraints
 
-**Detailed Explanation**: This challenge tests the ability to transfer learned neural representations across different cognitive tasks. The foundation model learns from the Surround Suppression (SuS) task, where participants passively view visual stimuli with varying levels of center-surround contrast suppression. The model must then predict performance on the Contrast Change Detection (CCD) task, where participants actively attend to and detect changes in visual contrast.
+- **Training Input**: ONLY SuS (Surround Suppression) EEG epochs
+- **Prediction Targets**: CCD (Continuous Contingent Difficulty) behavioral outcomes per trial:
+  - Response time (regression)
+  - Hit/miss accuracy (binary classification)
+  - Age (auxiliary regression)
+  - Sex (auxiliary classification)
+- **Constraint**: CCD EEG data is NOT provided and NOT allowed for training
+- **Architecture**: Shared encoder with 4 prediction heads
 
-**Example**: Consider a participant who shows strong gamma-band activity (30-100Hz) in visual cortex during SuS trials with high contrast suppression. The foundation model learns that this neural signature correlates with efficient visual processing. When applied to CCD data, the model predicts that participants with similar gamma patterns will have faster reaction times and higher accuracy in detecting contrast changes, even though CCD requires active attention while SuS is passive viewing.
+## Model Architecture
 
-```python
-# Example data flow
-sus_eeg = load_eeg_data(subject_id="S001", task="surroundSupp")  # Shape: (129, 128000)
-sus_tokens = tokenizer.tokenize(sus_eeg)  # Shape: (500, 129, 64)
-sus_features = foundation_model.encode(sus_tokens)  # Shape: (500, 512)
+### Per-Trial Approach
+Our implementation uses the **per-trial approach** as described in the challenge paper:
 
-# Transfer to CCD task
-ccd_eeg = load_eeg_data(subject_id="S001", task="contrastChangeDetection")
-ccd_performance = foundation_model.predict_performance(ccd_eeg)  # Scalar: 0.85 (85% accuracy)
+```
+SuS EEG (2s pre-trial) → Shared Encoder → 4 Prediction Heads
+                                    ├─ Response Time (regression)
+                                    ├─ Hit/Miss (binary classification)
+                                    ├─ Age (regression)
+                                    └─ Sex (classification)
 ```
 
-### **Challenge 2: Psychopathology Prediction**
-- **Input**: EEG signals from multiple tasks (passive + active)
-- **Targets**: 4 psychological factors:
-  - `p_factor`: General psychopathology factor
-  - `attention`: Attention problems
-  - `internalizing`: Anxiety, depression symptoms
-  - `externalizing`: Aggression, rule-breaking behavior
-- **Approach**: Multi-task regression from EEG features
+**Example**: A participant shows strong visual cortex activation during a SuS trial with high contrast suppression. The shared encoder learns this neural signature. The model then predicts that this participant will have:
+- Fast response time (450ms) on the corresponding CCD trial
+- High hit probability (0.85) for detecting the contrast change
+- Estimated age (16.2 years) and sex (female) from auxiliary heads
 
-**Detailed Explanation**: This challenge focuses on predicting dimensional measures of psychopathology from EEG biomarkers. The model analyzes neural activity patterns across multiple cognitive tasks to identify signatures associated with different aspects of mental health. Unlike traditional categorical diagnosis, this approach captures the continuous nature of psychological symptoms and their underlying neural mechanisms.
+### Encoder Options
 
-**Example**: A participant shows elevated frontal theta activity (4-8Hz) during resting state, reduced alpha suppression (8-12Hz) during attention tasks, and increased beta activity (13-30Hz) during emotional processing. The model learns that this pattern typically corresponds to:
-- `p_factor`: 2.3 (elevated general psychopathology)
-- `attention`: 1.8 (moderate attention difficulties)  
-- `internalizing`: 2.7 (high anxiety/depression symptoms)
-- `externalizing`: 0.9 (low aggression/rule-breaking)
-
+#### 1. CNN Encoder
 ```python
-# Example multi-task prediction
-multi_task_eeg = {
-    'rest': load_eeg_data(subject_id="S001", task="RestingState"),
-    'nback': load_eeg_data(subject_id="S001", task="nback"),
-    'emotion': load_eeg_data(subject_id="S001", task="DespicableMe")
-}
-
-# Extract features from all tasks
-features = foundation_model.extract_features(multi_task_eeg)
-
-# Predict psychological factors
-predictions = foundation_model.predict_psychopathology(features)
-# Output: {'p_factor': 2.3, 'attention': 1.8, 'internalizing': 2.7, 'externalizing': 0.9}
+# Temporal + Spatial Convolutions
+Temporal Conv → Spatial Conv → Global Pooling → Shared Features
 ```
 
-**Clinical Relevance**: These neural-based predictions can inform personalized treatment approaches, early intervention strategies, and our understanding of how different psychological symptoms manifest in brain activity patterns. The dimensional approach aligns with modern frameworks like the Research Domain Criteria (RDoC) that emphasize biological markers of mental health.
+**Architecture Details:**
+- **Temporal Filters**: [64, 128] with kernel sizes [25, 13, 7, 3]
+- **Spatial Filters**: [256, 256] for channel-wise feature extraction
+- **Dropout**: 0.2 for regularization
+- **Output**: 512-dimensional shared representation
 
-## 🏗️ System Architecture
+#### 2. Transformer Encoder
+```python
+# Multi-head Self-Attention with Positional Encoding
+EEG Patches → Patch Embedding → Positional Encoding → Transformer Layers → Global Pooling
+```
 
-### Data Processing Pipeline
+**Architecture Details:**
+- **Embedding Dimension**: 512
+- **Attention Heads**: 8
+- **Layers**: 6 transformer encoder layers
+- **Patch Size**: 16 timepoints per patch
+- **Positional Encoding**: Temporal + Spatial encoding for EEG data
+- **Activation**: GELU (better than ReLU for transformers)
+
+### Multi-Task Learning
+
+The model uses **multi-task learning** with weighted loss functions:
+
+```python
+Total Loss = Σ(weight_i × task_loss_i) + auxiliary_losses
+
+# Primary Tasks (CCD behavioral outcomes)
+- Response Time: MSE Loss (weight: 0.4)
+- Hit/Miss: Cross-Entropy Loss (weight: 0.4)
+
+# Auxiliary Tasks (demographics)
+- Age: MSE Loss (weight: 0.1)
+- Sex: Cross-Entropy Loss (weight: 0.1)
+
+# Auxiliary Losses (for better learning)
+- Sparsity Loss: L1 regularization on head weights
+- Task Vector Loss: Encourages different learning directions
+- Gradient Conflict Loss: Mitigates conflicting gradients
+```
+
+## Data Preparation
+
+### Dataset Structure
+We use the **HBN BIDS EEG dataset** with the following structure:
+
+```
+HBN_BIDS_EEG/
+├── cmi_bids_NC/     # Normal controls
+├── cmi_bids_R1/     # Release 1
+├── cmi_bids_R2/     # Release 2
+├── ...
+└── cmi_bids_R9/     # Release 9
+```
+
+### Per-Trial Matching Process
+
+1. **Load SuS EEG Data**: Extract 2-second pre-trial epochs
+2. **Load CCD Behavioral Data**: Extract trial-level outcomes
+3. **Temporal Alignment**: Match SuS epochs with CCD contrast change times
+4. **Create Per-Trial Samples**: Each sample = (SuS EEG, CCD outcomes)
+
+### Data Preprocessing Pipeline
 
 ```mermaid
 graph TD
-    A["Raw HBN EEG Data<br/>129 channels, 500Hz<br/>Multiple tasks"] --> B["EEGPTTokenizer<br/>Preprocessing Pipeline"]
-    
-    B --> C["1. Bandpass Filter<br/>0.5-70 Hz"]
-    C --> D["2. Resample<br/>500Hz → 256Hz"]
-    D --> E["3. Channel Alignment<br/>All 129 channels (E1-E128, Cz)"]
-    E --> F["4. Patch Creation<br/>64 samples × 129 channels"]
-    F --> G["5. Layer Normalization<br/>Per-patch normalization"]
-    
-    G --> H["Tokenized EEG Patches<br/>Shape: (n_patches, 129, 64)"]
-    
-    H --> I["Foundation Model<br/>Transformer Encoder"]
-    I --> J["Challenge 1: Cross-task<br/>SuS → CCD Transfer"]
-    I --> K["Challenge 2: Psychopathology<br/>4-factor prediction"]
-    
-    L["Dataset Loader<br/>HBN BIDS format"] --> A
-    
-    M["Configuration System<br/>YAML configs"] --> B
-    M --> I
-    
-    style A fill:#e1f5fe
-    style H fill:#f3e5f5
-    style I fill:#fff3e0
-    style J fill:#e8f5e8
-    style K fill:#e8f5e8
+    A[Raw EEG Data] --> B[Filter 0.5-70 Hz]
+    B --> C[Resample to 256 Hz]
+    C --> D[Extract 2s Pre-trial Epochs]
+    D --> E[Z-score Normalization]
+    E --> F[Per-Trial Dataset]
 ```
 
-### Model Architecture
+**Preprocessing Steps:**
+- **Filtering**: 0.5-70 Hz bandpass filter
+- **Resampling**: 256 Hz (EEGPT standard)
+- **Epoch Length**: 2 seconds (pre-trial duration)
+- **Normalization**: Z-score per channel
 
-```mermaid
-graph TD
-    A["Input: EEG Patches<br/>(n_patches, 129, 64)"] --> B["Patch Embedding<br/>Linear projection"]
-    
-    B --> C["Positional Encoding<br/>Temporal + Spatial"]
-    C --> D["Transformer Encoder<br/>Multi-head Self-Attention"]
-    
-    D --> E["Feature Extraction<br/>Global pooling"]
-    E --> F["Task-Specific Heads"]
-    
-    F --> G["Challenge 1:<br/>Performance Prediction"]
-    F --> H["Challenge 2:<br/>Psychopathology Factors"]
-    F --> I["Auxiliary Tasks:<br/>Age, Sex prediction"]
-    
-    J["Backbone Options"] --> K["BENDR Encoder<br/>(CNN-based)"]
-    J --> L["EEGPT Style<br/>(Transformer-based)"]
-    J --> M["Simple CNN<br/>(Baseline)"]
-    
-    K --> D
-    L --> D
-    M --> D
-    
-    style A fill:#e1f5fe
-    style D fill:#fff3e0
-    style G fill:#e8f5e8
-    style H fill:#e8f5e8
-    style I fill:#f3e5f5
-```
-
-## 📊 Dataset Analysis
-
-### HBN Dataset Statistics
-- **Total subjects**: 2,639 across 10 releases (cmi_bids_NC, cmi_bids_R1-R9)
-- **Channels**: 129 EEG channels (EGI HydroCel GSN 128 + Cz)
-- **Original sampling rate**: 500Hz → 256Hz (resampled)
-- **Channel layout**: E1-E128 + Cz (all EEG type)
-
-### Task Distribution
-- **Surround Suppression**: 2,112 subjects (Challenge 1 source)
-- **Contrast Change Detection**: 1,765 subjects (Challenge 1 target)
-- **Passive tasks**: RestingState, movies (DespicableMe, FunwithFractals, etc.)
-- **Active tasks**: symbolSearch, seqLearning variants
-
-### EEG Signal Characteristics
-- **Value range**: [-0.07, 0.14] (float64)
-- **Preprocessing**: 0.5-70Hz bandpass, 256Hz resampling
-- **Tokenization**: 64-sample patches (0.25s windows)
-
-## 🔧 Technical Implementation
-
-### 1. EEGPT-Style Tokenization
-
-Our core innovation is implementing EEGPT's patch-based tokenization for the full 129-channel HBN dataset:
+### Data Augmentation
 
 ```python
-class EEGPTTokenizer:
-    def __init__(self, patch_size=64, target_sfreq=256, use_all_channels=True):
-        self.patch_size = 64        # 0.25s at 256Hz
-        self.target_sfreq = 256     # EEGPT standard
-        self.use_all_channels = True # All 129 HBN channels
-        
-    def tokenize(self, eeg_data):
-        # Convert: (n_channels, n_samples) → (n_patches, n_channels, patch_size)
-        # Apply per-patch layer normalization (EEGPT standard)
-        return tokenized_patches
+# Applied during training
+- Gaussian Noise: σ = 0.01
+- Time Shift: ±10% of epoch length
+- Channel Dropout: 5% probability
 ```
 
-**Tokenizer Variants:**
-- `standard`: 64-sample patches, no overlap, all channels
-- `hbn`: Optimized for HBN's 129-channel layout  
-- `hbn_foundation`: 50% overlap for richer training data
-- `eegpt_original`: Original 62 EEGPT channels for comparison
+## Training Process
 
-### 2. Foundation Model Architecture
+### Training Configuration
+
+```yaml
+# Key Training Parameters
+max_epochs: 80
+batch_size: 32 (CNN) / 16 (Transformer)
+learning_rate: 1e-3 (CNN) / 5e-4 (Transformer)
+warmup_epochs: 5 (CNN) / 10 (Transformer)
+```
+
+### Learning Rate Scheduling
+
+**CNN**: Cosine annealing with warmup
+**Transformer**: Warmup + cosine annealing (critical for stability)
 
 ```python
-class EEGFoundationModel(pl.LightningModule):
-    def __init__(self, backbone='simple', challenge_type='cross_task'):
-        # Flexible backbone selection
-        self.backbone = self._create_backbone()  # CNN or Transformer
-        
-        # Multi-task prediction heads
-        if challenge_type == 'cross_task':
-            self.task_heads['performance'] = LinearHead(1)
-        elif challenge_type == 'psychopathology':
-            self.task_heads['p_factor'] = LinearHead(1)
-            self.task_heads['attention'] = LinearHead(1) 
-            self.task_heads['internalizing'] = LinearHead(1)
-            self.task_heads['externalizing'] = LinearHead(1)
-        
-        # Auxiliary tasks for representation learning
-        self.task_heads['age'] = LinearHead(1)
-        self.task_heads['sex'] = LinearHead(2)
+# Warmup Scheduler
+if epoch < warmup_epochs:
+    lr = warmup_start_lr + (base_lr - warmup_start_lr) * (epoch / warmup_epochs)
+else:
+    lr = base_lr * cosine_annealing_factor
 ```
 
-### 3. Training Strategy
+### Hardware Optimization
 
-**Multi-Task Learning with Weighted Loss:**
+- **Mixed Precision**: 16-bit training for memory efficiency
+- **Gradient Clipping**: 1.0 for transformer stability
+- **Parallel Processing**: 64 workers for data loading
+- **GPU Memory**: 6GB (CNN) / 12GB (Transformer) recommended
+
+## Performance Optimization
+
+### Parallel Data Loading
+
 ```python
-def compute_loss(self, outputs, labels):
-    loss = (
-        α₁ * mse_loss(pred_p_factor, true_p_factor) +
-        α₂ * mse_loss(pred_attention, true_attention) +
-        α₃ * mse_loss(pred_internal, true_internal) +
-        α₄ * mse_loss(pred_external, true_external) +
-        β₁ * mse_loss(pred_age, true_age) +
-        β₂ * ce_loss(pred_sex, true_sex)
-    )
-    return loss
+# Multi-threaded processing
+ThreadPoolExecutor(max_workers=64)
+Batch processing: 10 subjects at a time
+Speedup: 3-8x faster than sequential processing
 ```
+
+### Memory Management
+
+- **Batch Size**: Adaptive based on GPU memory
+- **Gradient Checkpointing**: Optional for memory efficiency
+- **Persistent Workers**: Keep data loader workers alive
+- **Pin Memory**: Optimize GPU transfer
+
+### Quick Test Mode
+
+For development and debugging:
+```python
+quick_test:
+  enabled: true
+  max_subjects: 5
+  bids_dirs: ["cmi_bids_R1"]
+```
+
+## Evaluation Metrics
+
+### Primary Metrics
+- **Response Time**: R² score (main challenge metric)
+- **Hit/Miss**: Accuracy and F1-score
+
+### Secondary Metrics
+- **Age**: R² score
+- **Sex**: Accuracy
+
+### Cross-Validation
+- **Strategy**: Subject-stratified 5-fold CV
+- **Splitting**: Subject-level to avoid data leakage
 
 ## 📁 Project Structure
 
 ```
 Project/
-├── 📄 README.md                    # This comprehensive documentation
-├── 📁 src/
-│   ├── 📁 data/
-│   │   ├── 📄 eegpt_tokenizer.py   # EEGPT-style patch tokenization
-│   │   ├── 📄 dataset_loader.py    # HBN dataset handling & preprocessing
-│   │   ├── 📄 quantization_utils.py # Alternative quantization methods
-│   │   └── 📄 data_explorer.py     # Dataset analysis utilities
-│   ├── 📁 models/
-│   │   ├── 📄 foundation_model.py  # Main foundation model
-│   │   ├── 📄 challenge1_baseline.py # Cross-task baseline
-│   │   └── 📄 test_model.py        # Model testing utilities
-│   ├── 📁 training/                # Training scripts
-│   ├── 📁 evaluation/              # Evaluation metrics
-│   └── 📁 utils/                   # General utilities
-├── 📁 configs/
-│   ├── 📄 dataset_config.yaml      # Dataset configuration
-│   └── 📄 model_config.yaml        # Model configuration
-├── 📁 docs/
-│   ├── 📄 MODEL_ARCHITECTURE.md    # Detailed model documentation
-│   └── 📄 CONFIGURATION_GUIDE.md   # Configuration guide
-├── 📁 data/                        # Processed data cache
-│   ├── 📁 raw/                     # Raw HBN-EEG data (symlinked)
-│   ├── 📁 processed/               # Preprocessed data
-│   └── 📁 features/                # Extracted features
-├── 📁 experiments/                 # Experiment scripts
-├── 📁 notebooks/                   # Exploratory analysis
-├── 📁 results/                     # Experiment results
-└── 📄 requirements.txt             # Python dependencies
+├── train_challenge1.py              # Main training script
+├── requirements.txt                 # Dependencies
+├── src/
+│   ├── models/
+│   │   └── challenge1_baseline.py   # CNN + Transformer models
+│   ├── data/
+│   │   └── dataset_loader.py        # Per-trial dataset loader
+│   ├── configs/
+│   │   └── challenge1_config.yaml   # Configuration file
+│   └── utils/
+│       └── gpu_utils.py             # GPU optimization utilities
+├── docs/                            # Documentation
+├── checkpoints/                     # Model checkpoints
+└── logs/                           # Training logs
 ```
 
-## 🚀 Key Innovations
+## Quick Start
 
-1. **Full Channel Utilization**: Unlike EEGPT's 64 channels, we use all 129 HBN channels (E1-E128 + Cz)
-2. **EEGPT-Style Tokenization**: First application of patch-based tokenization to HBN's high-density EEG
-3. **Multi-Challenge Architecture**: Single foundation model handles both transfer learning and psychopathology prediction
-4. **Flexible Backbone Support**: Compatible with BENDR, EEGPT, and custom architectures
-5. **Comprehensive Preprocessing**: EEGPT-standard pipeline optimized for HBN data characteristics
+### 1. Installation
 
-## 🔬 Preprocessing Pipeline
-
-### Signal Processing Steps:
-1. **Quality Control**: Handle boundary events and data discontinuities
-2. **Filtering**: 0.5-70 Hz bandpass (EEGPT standard)
-3. **Resampling**: 500Hz → 256Hz for computational efficiency
-4. **Channel Standardization**: Preserve all 129 channels with consistent naming
-5. **Patch Creation**: 64-sample temporal windows (0.25s duration)
-6. **Normalization**: Per-patch layer normalization following EEGPT
-
-### Tokenization Output:
-- **Shape**: `(n_patches, 129, 64)`
-- **Patch overlap**: Configurable (0%, 50% for foundation training)
-- **Temporal resolution**: 0.25s per patch at 256Hz
-- **Spatial resolution**: Full 129-channel coverage
-
-## 🎯 Challenge-Specific Approaches
-
-### Challenge 1: Cross-Task Transfer
-```python
-# Phase 1: Foundation training on Surround Suppression
-model.fit(sus_eeg_data, sus_behavioral_performance)
-
-# Phase 2: Transfer to Contrast Change Detection  
-model.freeze_backbone()  # Freeze learned EEG representations
-model.fine_tune(ccd_eeg_data, ccd_behavioral_performance)
-```
-
-### Challenge 2: Psychopathology Prediction
-```python
-# Multi-task training across all available EEG tasks
-# Shared backbone learns generalizable EEG representations
-# Task-specific heads predict individual psychological factors
-outputs = model(multi_task_eeg_data)
-# outputs = {'p_factor': ..., 'attention': ..., 'internalizing': ..., 'externalizing': ...}
-```
-
-## 📈 Expected Outcomes
-
-1. **Cross-Task Generalization**: Foundation model learns task-invariant EEG representations that transfer from passive (SuS) to active (CCD) paradigms
-2. **Psychopathology Prediction**: Multi-task learning improves individual factor prediction through shared neural representations  
-3. **Foundation Model Utility**: Creates reusable EEG encoder for future neuroscience applications
-4. **Methodological Contribution**: Demonstrates patch-based tokenization effectiveness for high-density EEG analysis
-
-## 🛠️ Setup Instructions
-
-### Prerequisites
-- Python 3.8+
-- PyTorch 1.12+
-- MNE-Python for EEG processing
-- HBN-EEG dataset access
-
-### Installation
 ```bash
-# Clone repository
+# Clone the repository
 git clone https://github.com/MojtabaMoodi/HBN-EEG.git
 cd Project
 
-# Setup virtual environment
-python -m venv venv
-source venv/bin/activate  # Linux/Mac
-# venv\Scripts\activate   # Windows
-
 # Install dependencies
 pip install -r requirements.txt
-
-# Link HBN dataset
-ln -s /path/to/HBN_BIDS_EEG data/raw/HBN_BIDS_EEG
 ```
 
-### Quick Start
+### 2. Data Setup
+
 ```bash
-# Explore dataset
-python src/data/data_explorer.py
-
-# Test tokenizer
-python src/data/eegpt_tokenizer.py
-
-# Train foundation model
-python src/training/train_challenge1.py --config configs/model_config.yaml
+# Ensure HBN BIDS EEG dataset is available
+# Expected path: ./data/raw/HBN_BIDS_EEG/
 ```
 
-## 📚 Documentation
+### 3. Training
 
-- **[Model Architecture](docs/MODEL_ARCHITECTURE.md)**: Detailed model implementation
-- **[Configuration Guide](docs/CONFIGURATION_GUIDE.md)**: Setup and configuration options
-- **[API Reference](src/)**: Source code documentation
+```bash
+# Train with Transformer encoder (recommended)
+python train_challenge1.py --config src/configs/challenge1_config.yaml --encoder transformer
 
-## 🏆 Competition Details
+# Train with CNN encoder
+python train_challenge1.py --encoder cnn
 
-- **Competition**: NeurIPS 2025 EEG Foundation Challenge
-- **Deadline**: August 01, 2025
-- **Dataset**: HBN-EEG (3000+ participants, 129-channel EEG)
-- **Prizes**: $2,500 + NeurIPS presentation opportunity
-- **Website**: [https://eeg2025.github.io/](https://eeg2025.github.io/)
+# Quick test mode
+python train_challenge1.py --quick-test
+```
 
-### Challenge Context & Innovation
+### 4. Configuration
 
-This competition represents a significant advancement in EEG analysis by focusing on **foundation models** - a paradigm shift from task-specific approaches to generalizable neural decoders. Unlike previous [EEG challenges](https://github.com/zqs01/eeg_challenge_code) that focused on auditory-EEG coupling (e.g., speech-to-EEG matching, mel spectrogram reconstruction), this challenge addresses:
+Edit `src/configs/challenge1_config.yaml` to customize:
+- Model architecture (CNN vs Transformer)
+- Training parameters
+- Data preprocessing
+- Hardware settings
 
-1. **Cross-modal transfer**: Visual attention tasks instead of auditory processing
-2. **High-density recordings**: 129 channels vs. typical 64-channel setups  
-3. **Foundation model approach**: Pre-training → fine-tuning paradigm
-4. **Clinical applications**: Direct prediction of psychopathology dimensions
+## Key Features
 
-### Evaluation Framework
+### Challenge Compliance
+- **Per-trial approach**: Matches SuS EEG with CCD behavioral outcomes
+- **No CCD EEG usage**: Only SuS EEG for training
+- **Multi-task learning**: 4 prediction heads as required
+- **Subject-level splitting**: Prevents data leakage
 
-**Challenge 1 Metrics:**
-- **Primary**: Pearson correlation between predicted and actual CCD performance
-- **Secondary**: Mean squared error of behavioral predictions
-- **Baseline**: Random prediction (r ≈ 0), simple demographic models (r ≈ 0.1-0.2)
+### Performance Optimizations
+- **Parallel processing**: 3-8x speedup in data loading
+- **Memory efficiency**: Mixed precision and gradient checkpointing
+- **Hardware optimization**: Automatic GPU configuration
+- **Quick test mode**: Fast development and debugging
 
-**Challenge 2 Metrics:**
-- **Primary**: Multi-task regression performance across 4 psychological factors
-- **Secondary**: Individual factor prediction accuracy (p-factor, attention, internalizing, externalizing)
-- **Clinical validation**: Correlation with standard clinical assessments (CBCL, Conners scales)
+### Robust Architecture
+- **Dual encoders**: CNN and Transformer options
+- **Advanced losses**: Sparsity, task vectors, gradient conflicts
+- **Comprehensive validation**: Multiple metrics and cross-validation
+- **Reproducibility**: Deterministic training and proper seeding
 
-### Related EEG Challenges
+## Expected Performance
 
-Building on success of competitions like the [ICASSP 2024 Auditory EEG Challenge](https://github.com/praweshd/ICASSP-2024-auditory-eeg-challenge), which featured ~200 hours of speech-EEG data from 105 subjects, this foundation challenge scales to:
-- **10x more subjects**: 2,639 vs ~100 typical participants
-- **Diverse cognitive tasks**: Visual attention, working memory, resting state
-- **Clinical outcomes**: Psychopathology factors vs. purely perceptual tasks
-- **Foundation modeling**: Transferable representations vs. task-specific decoders
+Based on the challenge paper and our implementation:
 
-## 📖 References
+### Quick Test (5 subjects)
+- **Processing Time**: 30-60 seconds
+- **Samples**: ~300-500 per-trial samples
+- **Memory Usage**: ~2-4 GB
 
-- **EEGPT**: Large-scale EEG foundation model for general-purpose EEG signal analysis
-- **BENDR**: Using deep learning to parse the neural code of sleep and dreams  
-- **HBN Dataset**: Healthy Brain Network biobank for mental health research
-- **EEG Foundation Challenge**: Cross-task and cross-subject EEG decoding competition
+### Full Dataset (All subjects)
+- **Processing Time**: 300-360 minutes
+- **Samples**: ~50,000+ per-trial samples
+- **Memory Usage**: ~8-16 GB
+
+## Troubleshooting
+
+### Common Issues
+
+1. **Memory Errors**
+   ```bash
+   # Reduce batch size in config
+   batch_size: 16  # or 8 for very limited memory
+   ```
+
+2. **Slow Data Loading**
+   ```bash
+   # Enable parallel processing
+   parallel:
+     enabled: true
+     max_workers: 64
+   ```
+
+3. **Training Instability (Transformer)**
+   ```bash
+   # Reduce learning rate and increase warmup
+   learning_rate: 5e-4
+   warmup_epochs: 10
+   gradient_clip_val: 1.0
+   ```
+
+### Debug Mode
+
+```python
+import logging
+logging.basicConfig(level=logging.DEBUG)
+```
+
+## References
+
+- [EEG Foundation Challenge Paper](https://arxiv.org/pdf/2506.19141)
+- [HBN BIDS EEG Dataset](https://fcon_1000.projects.nitrc.org/indi/cmi_healthy_brain_network/)
+- [PyTorch Lightning Documentation](https://lightning.ai/docs/pytorch/stable/)
+- [MNE-Python Documentation](https://mne.tools/stable/)
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Run tests and ensure compliance
+5. Submit a pull request
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+## Support
+
+For issues and questions:
+- Check the troubleshooting section
+- Review the configuration guide
+- Create an issue on GitHub
 
 ---
 
-*This project combines cutting-edge EEG foundation model techniques with competition-specific adaptations to advance our understanding of neural signal processing and mental health prediction.* 
+**Note**: This implementation follows the official challenge constraints and uses the per-trial approach as described in the EEG Foundation Challenge paper. The model is designed to predict CCD behavioral outcomes using only SuS EEG data, demonstrating cross-task transfer learning capabilities.
