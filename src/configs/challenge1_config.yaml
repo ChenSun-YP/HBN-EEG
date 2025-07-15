@@ -1,0 +1,257 @@
+# Challenge 1: Cross-Task Transfer Learning Configuration
+# EEG Foundation Challenge 2025
+# 
+# CONSTRAINT: Training with ONLY SuS EEG data (per-trial approach)
+# PREDICTION: CCD behavioral outcomes + demographics (4 heads)
+
+# Model Architecture
+model:
+  name: "Challenge1Model"
+  n_channels: 129          # HBN EEG channels (E1-E128 + Cz)
+  n_times: 512             # Time samples per epoch (2s at 256Hz for pre-trial epochs)
+  hidden_dim: 512          # Shared encoder hidden dimension
+  
+  # Encoder Type: 'cnn' or 'transformer'
+  encoder_type: "transformer"  # Choose between CNN and Transformer
+  
+  # CNN Encoder Settings (used if encoder_type == 'cnn')
+  cnn:
+    temporal_filters: [64, 128]     # Number of temporal filters
+    spatial_filters: [256, 256]     # Number of spatial filters
+    kernel_sizes: [25, 13, 7, 3]    # Convolution kernel sizes
+    dropout: 0.2                    # Dropout probability
+  
+  # Transformer Encoder Settings (used if encoder_type == 'transformer')
+  transformer:
+    d_model: 512               # Transformer embedding dimension (same as hidden_dim)
+    nhead: 8                   # Number of attention heads
+    num_layers: 6              # Number of transformer layers
+    dropout: 0.1               # Dropout probability
+    patch_size: 16             # Temporal patch size for tokenization
+    activation: "gelu"         # Activation function (gelu/relu)
+    norm_first: true           # Pre-norm vs post-norm architecture
+
+# Data Configuration (Per-Trial Dataset)
+data:
+  data_dir: "./data/raw/HBN_BIDS_EEG"
+  channel_count: 129         # Number of EEG channels
+  sampling_rate: 256         # Target sampling rate (Hz)
+  
+  # Per-trial specific settings
+  per_trial:
+    pre_trial_duration: 2.0  # Duration of pre-trial epoch (seconds)
+    match_sus_to_ccd: true   # Match SuS pre-trial EEG to CCD behavioral outcomes
+    
+  # Data splits (subject-level)
+  train_split: 0.7
+  val_split: 0.15
+  test_split: 0.15
+  
+  # Preprocessing
+  preprocessing:
+    filter_low: 0.5         # High-pass filter (Hz)
+    filter_high: 70.0       # Low-pass filter (Hz)
+    resample_freq: 256      # Resample to 256Hz (EEGPT standard)
+    epoch_length: 2.0       # Epoch length in seconds (pre-trial duration)
+    
+  # Data augmentation
+  augmentation:
+    noise_factor: 0.01      # Gaussian noise augmentation
+    time_shift: 0.1         # Time shift augmentation (±10%)
+    channel_dropout: 0.05   # Random channel dropout probability
+
+# Parallel Processing Configuration
+parallel:
+  enabled: true            # Enable parallel processing
+  max_workers: 64          # Maximum number of worker processes
+  batch_size: 10           # Number of subjects to process in parallel batches
+  
+# Quick Test Mode (for development)
+quick_test:
+  enabled: false           # Set to true for quick testing
+  max_subjects: 5          # Maximum number of subjects to process
+  bids_dirs: ["cmi_bids_R1", "cmi_bids_R2"]  # BIDS directories to include in quick test
+
+# Training Configuration
+training:
+  # Optimizer
+  learning_rate: 1e-3      # Base learning rate
+  weight_decay: 1e-4       # L2 regularization
+  min_lr: 1e-6             # Minimum learning rate for scheduler
+  
+  # Learning rate scheduling (different for CNN vs Transformer)
+  scheduler:
+    type: "cosine"         # cosine, linear, polynomial
+    warmup_epochs: 5       # Learning rate warmup (important for transformers)
+    warmup_start_lr: 1e-5  # Starting learning rate for warmup
+  
+  # Training schedule
+  max_epochs: 80  # Proper training duration for transformer
+  batch_size: 32           # Reduce if GPU memory issues
+  accumulate_grad_batches: 1
+  gradient_clip_val: 1.0   # Important for transformer stability
+  
+  # Mixed precision training
+  mixed_precision: true
+  
+  # Multi-task loss weights (sum to 1.0)
+  loss_weights:
+    age: 0.1              # Auxiliary task
+    sex: 0.1              # Auxiliary task
+    response_time: 0.4    # Primary task
+    hit_miss: 0.4         # Primary task
+  
+  # Auxiliary loss weights for task-specific learning (literature-based)
+  aux_loss_weights:
+    sparsity: 0.01        # L1 regularization on head weights (Lachapelle et al. 2023)
+    task_vector: 0.005    # Encourages different learning directions (model merging literature)
+    gradient_conflict: 0.002  # Mitigates conflicting gradients (Yu et al. 2020)
+  
+  # Task-specific parameters
+  response_time_scale: 1000.0  # Scaling factor for response time predictions
+  
+  # Early stopping
+  early_stopping:
+    patience: 15          # Increased patience for transformer training
+    monitor: "val/total_loss"
+    mode: "min"
+    min_delta: 0.001
+
+# Validation Configuration
+validation:
+  val_check_interval: 0.25  # Check validation every 25% of epoch
+  
+  # Metrics to track
+  metrics:
+    - "response_time_r2"    # R² for response time regression
+    - "hit_miss_acc"        # Accuracy for hit/miss classification
+    - "age_r2"              # R² for age regression
+    - "sex_acc"             # Accuracy for sex classification
+
+# Hardware Configuration
+hardware:
+  num_workers: 4           # Data loader workers
+  pin_memory: true         # Pin memory for GPU
+  persistent_workers: true # Keep workers alive between epochs
+  
+  # GPU settings (transformer needs more memory)
+  precision: 16            # Mixed precision (16-bit)
+  find_unused_parameters: false
+  
+  # Architecture-specific recommendations
+  cnn_memory_gb: 6         # Recommended GPU memory for CNN
+  transformer_memory_gb: 12 # Recommended GPU memory for Transformer
+
+# Logging Configuration
+logging:
+  log_every_n_steps: 10
+  save_top_k: 3
+  monitor: "val/total_loss"
+  
+  # Experiment tracking
+  experiment_name: "challenge1_per_trial"
+  project_name: "eeg_foundation_challenge"
+  
+  # Checkpoints
+  checkpoint_dir: "./checkpoints/challenge1"
+  save_last: true
+  save_weights_only: false
+
+# Challenge 1 Specific Settings (Per-Trial Approach)
+challenge1:
+  # Data constraints (OFFICIAL REQUIREMENTS)
+  use_only_sus_eeg: true              # CONSTRAINT: Only SuS EEG for training
+  predict_ccd_behavioral: true        # Predict CCD behavioral outcomes
+  per_trial_matching: true            # Use per-trial matching approach
+  
+  # Target variables (per-trial targets)
+  targets:
+    response_time:
+      type: "regression"
+      min_val: 0.0                    # Minimum response time (ms)
+      max_val: 2000.0                 # Maximum response time (ms)
+      
+    hit_miss:
+      type: "classification"
+      num_classes: 2                  # Hit=1, Miss=0
+      class_names: ["miss", "hit"]
+      
+    age:
+      type: "regression"
+      min_val: 5.0                    # Minimum age (years)
+      max_val: 22.0                   # Maximum age (years)
+      
+    sex:
+      type: "classification"
+      num_classes: 2                  # Male=0, Female=1
+      class_names: ["male", "female"]
+  
+  # Evaluation metrics
+  evaluation:
+    primary_metric: "response_time_r2"  # Main metric for Challenge 1
+    secondary_metrics:
+      - "hit_miss_acc"
+      - "age_r2"
+      - "sex_acc"
+    
+    # Cross-validation
+    cv_folds: 5
+    cv_strategy: "subject_stratified"   # Stratify by subject ID
+    
+# Reproducibility
+seed: 42
+deterministic: true
+benchmark: false                       # Disable for reproducibility
+
+# Data Quality Checks
+quality_checks:
+  max_bad_channels: 10               # Maximum bad channels per epoch
+  max_amplitude: 200.0               # Maximum amplitude (μV)
+  min_epoch_length: 1.8              # Minimum epoch length (s) for 2s epochs
+  
+  # Artifact rejection
+  reject_criteria:
+    eeg: 200e-6                      # 200 μV threshold
+    
+  # Channel interpolation
+  interpolate_bad_channels: true
+  max_interpolated: 5                # Maximum channels to interpolate
+
+# Architecture Comparison Settings
+comparison:
+  # Run both architectures for comparison
+  run_both_architectures: false      # Set to true to train both CNN and Transformer
+  
+  # Architecture-specific hyperparameters
+  cnn_config:
+    learning_rate: 1e-3
+    batch_size: 32
+    max_epochs: 80
+    
+  transformer_config:
+    learning_rate: 5e-4              # Lower learning rate for stability
+    batch_size: 16                   # Smaller batch size due to memory
+    max_epochs: 120                  # May need more epochs
+    warmup_epochs: 10                # Longer warmup for transformers
+
+# Performance Optimization
+performance:
+  # DataLoader optimization settings
+  dataloader:
+    # Use persistent workers for better performance
+    persistent_workers: true
+    # Pin memory for GPU transfer
+    pin_memory: true
+    # Prefetch factor for data loading
+    prefetch_factor: 2
+    # Number of worker processes for data loading
+    num_workers: 4
+    
+  # Memory optimization
+  memory:
+    # Enable memory-efficient attention for transformers
+    efficient_attention: true
+    # Use gradient checkpointing to save memory
+    gradient_checkpointing: false
+    # Clear cache between epochs
+    clear_cache: true 
