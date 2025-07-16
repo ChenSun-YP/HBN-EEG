@@ -59,7 +59,8 @@ class Challenge1Dataset(Dataset):
     """
     
     def __init__(self, data_dir: str, config: Dict[str, Any], split: str = 'train', 
-                 subject_split: Optional[Dict[str, List[str]]] = None, transforms=None):
+                 subject_split: Optional[Dict[str, List[str]]] = None, transforms=None, 
+                 samples: Optional[List] = None):
         """
         Initialize per-trial dataset
         
@@ -69,6 +70,7 @@ class Challenge1Dataset(Dataset):
             split: Dataset split ('train', 'val', 'test')
             subject_split: Optional pre-defined subject splits
             transforms: Optional transforms to apply
+            samples: Pre-processed samples (for reuse)
         """
         self.data_dir = Path(data_dir)
         self.config = config
@@ -80,6 +82,12 @@ class Challenge1Dataset(Dataset):
         self.channel_count = config['data']['channel_count']
         self.sampling_rate = config['data']['sampling_rate']
         self.pre_trial_duration = 2.0  # 2 seconds as specified in paper
+        
+        # If samples are provided, use them directly (for reuse)
+        if samples is not None:
+            self.samples = samples
+            logger.info(f"Reusing {len(self.samples)} pre-processed samples for {split} split")
+            return
         
         # Parallel processing configuration
         self.use_parallel = config.get('parallel', {}).get('enabled', True)
@@ -625,26 +633,34 @@ def create_challenge1_dataloaders(
         'test': test_subjects
     }
     
-    # Create datasets for each split
+    # Filter samples for each split using the already processed data
+    train_samples = [s for s in full_dataset.samples if s['subject_id'] in train_subjects]
+    val_samples = [s for s in full_dataset.samples if s['subject_id'] in val_subjects]
+    test_samples = [s for s in full_dataset.samples if s['subject_id'] in test_subjects]
+    
+    # Create datasets for each split using pre-processed samples
     train_dataset = Challenge1Dataset(
         data_dir=data_dir,
         config=config,
         split='train',
-        subject_split=subject_split
+        subject_split=subject_split,
+        samples=train_samples
     )
     
     val_dataset = Challenge1Dataset(
         data_dir=data_dir,
         config=config,
         split='val',
-        subject_split=subject_split
+        subject_split=subject_split,
+        samples=val_samples
     )
     
     test_dataset = Challenge1Dataset(
         data_dir=data_dir,
         config=config,
         split='test',
-        subject_split=subject_split
+        subject_split=subject_split,
+        samples=test_samples
     )
     
     # Create data loaders
