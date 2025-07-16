@@ -130,7 +130,7 @@ validation:
 
 # Hardware Configuration
 hardware:
-  num_workers: 4           # Data loader workers
+  num_workers: 16           # Data loader workers
   pin_memory: true         # Pin memory for GPU
   persistent_workers: true # Keep workers alive between epochs
   
@@ -245,7 +245,7 @@ performance:
     # Prefetch factor for data loading
     prefetch_factor: 2
     # Number of worker processes for data loading
-    num_workers: 4
+    num_workers: 16
     
   # Memory optimization
   memory:
@@ -254,4 +254,11 @@ performance:
     # Use gradient checkpointing to save memory
     gradient_checkpointing: false
     # Clear cache between epochs
-    clear_cache: true 
+    clear_cache: true
+
+# Data Caching Configuration
+caching:
+  enabled: true              # Enable data caching for faster subsequent runs
+  cache_dir: "./cache"       # Directory to store cache files
+  clear_cache: false         # Set to true to force reprocessing and clear cache
+  cache_format: "pickle"     # Cache format (pickle, joblib, h5py) 

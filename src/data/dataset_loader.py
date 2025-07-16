@@ -89,6 +89,16 @@ class Challenge1Dataset(Dataset):
             logger.info(f"Reusing {len(self.samples)} pre-processed samples for {split} split")
             return
         
+        # Try to load from cache first (if enabled)
+        cache_config = config.get('caching', {})
+        cache_enabled = cache_config.get('enabled', True)
+        
+        if cache_enabled:
+            cache_file = self._get_cache_file_path()
+            if self._load_from_cache(cache_file):
+                logger.info(f"Loaded {len(self.samples)} samples from cache for {split} split")
+                return
+        
         # Parallel processing configuration
         self.use_parallel = config.get('parallel', {}).get('enabled', True)
         self.max_workers = config.get('parallel', {}).get('max_workers', min(64, multiprocessing.cpu_count()))
@@ -107,6 +117,10 @@ class Challenge1Dataset(Dataset):
         # Create per-trial samples
         self.samples = []
         self._create_per_trial_samples()
+        
+        # Save to cache (if enabled)
+        if cache_enabled:
+            self._save_to_cache(cache_file)
         
         logger.info(f"Created {len(self.samples)} per-trial samples for {split} split")
     
@@ -581,6 +595,45 @@ class Challenge1Dataset(Dataset):
             'trial_id': self.samples[idx]['trial_id'],
             'release': self.samples[idx]['release']
         }
+    
+    def _get_cache_file_path(self) -> Path:
+        """Generate cache file path based on configuration and split"""
+        import hashlib
+        
+        # Create a hash of the configuration to ensure cache invalidation when config changes
+        config_str = str(sorted(self.config.items()))
+        config_hash = hashlib.md5(config_str.encode()).hexdigest()[:8]
+        
+        # Include split in filename
+        cache_config = self.config.get('caching', {})
+        cache_dir = Path(cache_config.get('cache_dir', './cache'))
+        cache_dir.mkdir(exist_ok=True)
+        
+        cache_file = cache_dir / f"challenge1_samples_{self.split}_{config_hash}.pkl"
+        return cache_file
+    
+    def _load_from_cache(self, cache_file: Path) -> bool:
+        """Load samples from cache file"""
+        try:
+            if cache_file.exists():
+                import pickle
+                with open(cache_file, 'rb') as f:
+                    self.samples = pickle.load(f)
+                logger.info(f"Cache loaded from {cache_file}")
+                return True
+        except Exception as e:
+            logger.warning(f"Failed to load cache from {cache_file}: {e}")
+        return False
+    
+    def _save_to_cache(self, cache_file: Path) -> None:
+        """Save samples to cache file"""
+        try:
+            import pickle
+            with open(cache_file, 'wb') as f:
+                pickle.dump(self.samples, f)
+            logger.info(f"Cache saved to {cache_file}")
+        except Exception as e:
+            logger.warning(f"Failed to save cache to {cache_file}: {e}")
 
 def create_challenge1_dataloaders(
     data_dir: str,
@@ -589,7 +642,8 @@ def create_challenge1_dataloaders(
     num_workers: int = 4,
     test_size: float = 0.2,
     val_size: float = 0.2,
-    random_state: int = 42
+    random_state: int = 42,
+    clear_cache: bool = False
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """
     Create train, validation, and test dataloaders for Challenge 1 using per-trial approach
@@ -602,10 +656,20 @@ def create_challenge1_dataloaders(
         test_size: Test set size (fraction)
         val_size: Validation set size (fraction)
         random_state: Random state for reproducibility
+        clear_cache: Whether to clear existing cache and reprocess data
         
     Returns:
         Tuple of (train_loader, val_loader, test_loader)
     """
+    # Clear cache if requested
+    if clear_cache:
+        cache_config = config.get('caching', {})
+        cache_dir = Path(cache_config.get('cache_dir', './cache'))
+        if cache_dir.exists():
+            import shutil
+            shutil.rmtree(cache_dir)
+            logger.info(f"Cache cleared from {cache_dir}")
+    
     # Create full dataset to get all subjects
     full_dataset = Challenge1Dataset(
         data_dir=data_dir,
