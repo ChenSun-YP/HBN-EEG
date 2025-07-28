@@ -3,26 +3,10 @@
 Training Script for Challenge 1: Cross-Task Transfer Learning
 EEG Foundation Challenge 2025
 
-OFFICIAL CHALLENGE CONSTRAINTS:
-- Training Input: ONLY SuS (Surround Suppression) EEG epochs (per-trial approach)
-- Prediction Targets: CCD behavioral outcomes per trial:
-  * Response time (regression)
-  * Hit/miss accuracy (binary classification)
-  * Age (auxiliary regression)
-  * Sex (auxiliary classification)
-- Constraint: CCD EEG data is NOT provided and NOT allowed for training
-- Architecture: Shared encoder with 4 prediction heads
-
-This script trains a shared encoder with 4 prediction heads using multi-task learning
-on SuS EEG data to predict CCD behavioral outcomes and demographic information.
-
-The per-trial approach matches SuS pre-trial EEG epochs (2 seconds before contrast change)
-with CCD behavioral outcomes for each individual trial.
-
 Supports both CNN and Transformer encoders with architecture-specific optimizations.
 
 Usage:
-    python train_challenge1.py --config configs/challenge1_config.yaml
+    python train_challenge1.py --config src/configs/challenge1_config.yaml
     python train_challenge1.py --encoder cnn
     python train_challenge1.py --encoder transformer
     
@@ -130,13 +114,14 @@ class Challenge1Trainer:
         gpus: List of available GPUs
     """
     
-    def __init__(self, config: Dict[str, Any]) -> None:
+    def __init__(self, config: Dict[str, Any], checkpoint_path: Optional[str] = None) -> None:
         """
         Initialize Challenge 1 trainer.
         
         Args:
             config: Configuration dictionary from YAML file containing all
                    training parameters, model configuration, and data settings.
+            checkpoint_path: Optional path to checkpoint file for resuming training
                    
         Raises:
             ValueError: If configuration is invalid or missing required keys
@@ -144,6 +129,7 @@ class Challenge1Trainer:
         """
         self.config = config
         self.encoder_type = config['model'].get('encoder_type', 'cnn')
+        self.checkpoint_path = checkpoint_path
         
         # GPU setup first
         self.gpu_config = get_recommended_config()  # Call without model initially
@@ -158,14 +144,7 @@ class Challenge1Trainer:
         
         # Check GPU memory requirements
         self._check_gpu_requirements()
-        
-        logger.info("="*70)
-        logger.info("EEG Foundation Challenge 1: Cross-Task Transfer Learning")
-        logger.info("Per-Trial Approach: SuS EEG → CCD Behavioral Outcomes")
-        logger.info("="*70)
-        logger.info(f"Training with ONLY SuS EEG data (per-trial matching)")
-        logger.info(f"Predicting CCD behavioral outcomes + demographics")
-        logger.info(f"Architecture: Shared {self.encoder_type.upper()} encoder + 4 heads")
+
     
     def _validate_config(self) -> None:
         """
@@ -199,15 +178,6 @@ class Challenge1Trainer:
         if self.gpus['cuda_available']:
             logger.info(f"GPU Memory: {[f'{mem:.1f}GB' for mem in self.gpus['gpu_memory']]}")
         logger.info("="*70)
-        
-        # Print challenge constraints
-        logger.info("\nOFFICIAL CHALLENGE CONSTRAINTS:")
-        logger.info("   • Training Input: ONLY SuS EEG epochs")
-        logger.info("   • Prediction Targets: CCD behavioral outcomes + demographics")
-        logger.info("   • Constraint: CCD EEG data is NOT provided/allowed for training")
-        logger.info("   • Architecture: Shared encoder with 4 prediction heads")
-        logger.info("   • Multi-task Learning: Weighted loss across all heads")
-        logger.info("")
         
         # Print architecture-specific information
         if self.encoder_type == 'transformer':
@@ -349,7 +319,8 @@ class Challenge1Trainer:
             save_top_k=self.config['logging']['save_top_k'],
             save_last=self.config['logging']['save_last'],
             save_weights_only=self.config['logging']['save_weights_only'],
-            verbose=True
+            verbose=True,
+            save_on_train_epoch_end=self.config['logging']['save_on_train_epoch_end'],  # Only save at validation end, not every epoch
         )
         callbacks.append(checkpoint_callback)
         
@@ -400,6 +371,9 @@ class Challenge1Trainer:
         }
         
         # GPU configuration
+        logger.info(f"GPU Info: {self.gpus}")
+        logger.info(f"Debug mode: {self.config.get('debug', False)}")
+        
         if self.gpus['cuda_available']:
             # In debug mode, use single GPU to avoid distributed training issues
             if self.config.get('debug', False):
@@ -418,8 +392,10 @@ class Challenge1Trainer:
                 
                 # Multi-GPU strategy
                 if self.gpus['num_gpus'] > 1:
-                    trainer_config['strategy'] = 'ddp'
-                    logger.info(f"Using DDP strategy with {self.gpus['num_gpus']} GPUs")
+                    trainer_config['strategy'] = 'ddp_find_unused_parameters_true'
+                    logger.info(f"Using DDP strategy with {self.gpus['num_gpus']} GPUs (find_unused_parameters=True)")
+                else:
+                    logger.info(f"Single GPU detected: {self.gpus['num_gpus']} GPU")
         else:
             trainer_config.update({
                 'accelerator': 'cpu',
@@ -427,17 +403,19 @@ class Challenge1Trainer:
             })
             logger.info("Using CPU training")
         
+        logger.info(f"Final trainer config: {trainer_config}")
+        
         trainer = pl.Trainer(**trainer_config)
         
         return trainer
     
-    def evaluate_model(self, model: Challenge1Model, test_loader) -> Dict[str, float]:
+    def evaluate_model(self, model: Challenge1Model, val_loader) -> Dict[str, float]:
         """
-        Evaluate the trained model on test set
+        Evaluate the trained model on validation set
         
         Args:
             model: Trained Challenge 1 model
-            test_loader: Test data loader
+            val_loader: Validation data loader
             
         Returns:
             Dictionary with evaluation metrics
@@ -446,35 +424,35 @@ class Challenge1Trainer:
         model.eval()
         
         all_predictions = {
-            'age': [],
-            'sex': [],
             'response_time': [],
             'hit_miss': []
         }
         
         all_targets = {
-            'age': [],
-            'sex': [],
             'response_time': [],
             'hit_miss': []
         }
         
         with torch.no_grad():
-            for batch in test_loader:
-                eeg_data, targets = batch
+            for batch in val_loader:
+                input_features, targets = batch
                 
                 # Move to device
                 if torch.cuda.is_available():
-                    eeg_data = eeg_data.cuda()
+                    # Handle both dictionary and tensor formats
+                    if isinstance(input_features, dict):
+                        input_features = {k: v.cuda() for k, v in input_features.items()}
+                    else:
+                        input_features = input_features.cuda()
                     targets = {k: v.cuda() for k, v in targets.items()}
                 
                 # Forward pass
-                predictions = model(eeg_data)
+                predictions = model(input_features)
                 
                 # Collect predictions and targets
                 for key in all_predictions.keys():
                     if key in predictions:
-                        if key in ['sex', 'hit_miss']:
+                        if key == 'hit_miss':
                             # Classification: get predicted class
                             pred_class = torch.argmax(predictions[key], dim=1)
                             all_predictions[key].extend(pred_class.cpu().numpy())
@@ -487,30 +465,35 @@ class Challenge1Trainer:
         # Calculate metrics
         metrics = {}
         
-        # Age metrics (regression)
-        if all_targets['age']:
-            age_r2 = r2_score(all_targets['age'], all_predictions['age'])
-            age_mae = mean_absolute_error(all_targets['age'], all_predictions['age'])
-            age_rmse = np.sqrt(mean_squared_error(all_targets['age'], all_predictions['age']))
-            
-            metrics['age_r2'] = age_r2
-            metrics['age_mae'] = age_mae
-            metrics['age_rmse'] = age_rmse
-        
-        # Sex metrics (classification)
-        if all_targets['sex']:
-            sex_acc = accuracy_score(all_targets['sex'], all_predictions['sex'])
-            metrics['sex_accuracy'] = sex_acc
-        
         # Response time metrics (regression) - PRIMARY METRIC
         if all_targets['response_time']:
-            rt_r2 = r2_score(all_targets['response_time'], all_predictions['response_time'])
-            rt_mae = mean_absolute_error(all_targets['response_time'], all_predictions['response_time'])
-            rt_rmse = np.sqrt(mean_squared_error(all_targets['response_time'], all_predictions['response_time']))
+            # Apply numerical stability checks
+            rt_targets = np.array(all_targets['response_time'])
+            rt_predictions = np.array(all_predictions['response_time'])
             
-            metrics['response_time_r2'] = rt_r2
-            metrics['response_time_mae'] = rt_mae
-            metrics['response_time_rmse'] = rt_rmse
+            # Check for invalid values
+            if np.any(np.isnan(rt_predictions)) or np.any(np.isinf(rt_predictions)):
+                logger.warning(f"Invalid predictions detected: NaN={np.any(np.isnan(rt_predictions))}, Inf={np.any(np.isinf(rt_predictions))}")
+                rt_predictions = np.where(np.isfinite(rt_predictions), rt_predictions, np.median(rt_targets))
+            
+            if np.any(np.isnan(rt_targets)) or np.any(np.isinf(rt_targets)):
+                logger.warning(f"Invalid targets detected: NaN={np.any(np.isnan(rt_targets))}, Inf={np.any(np.isinf(rt_targets))}")
+                rt_targets = np.where(np.isfinite(rt_targets), rt_targets, np.median(rt_targets))
+            
+            # Ensure both arrays have finite values before computing metrics
+            if np.all(np.isfinite(rt_targets)) and np.all(np.isfinite(rt_predictions)):
+                rt_r2 = r2_score(rt_targets, rt_predictions)
+                rt_mae = mean_absolute_error(rt_targets, rt_predictions)
+                rt_rmse = np.sqrt(mean_squared_error(rt_targets, rt_predictions))
+                
+                metrics['response_time_r2'] = rt_r2
+                metrics['response_time_mae'] = rt_mae
+                metrics['response_time_rmse'] = rt_rmse
+            else:
+                logger.warning("Cannot compute metrics due to invalid values")
+                metrics['response_time_r2'] = 0.0
+                metrics['response_time_mae'] = float('inf')
+                metrics['response_time_rmse'] = float('inf')
         
         # Hit/miss metrics (classification)
         if all_targets['hit_miss']:
@@ -520,7 +503,16 @@ class Challenge1Trainer:
         return metrics
     
     def train(self):
-        """Main training function"""
+        # Create callbacks and trainer
+        callbacks = self.create_callbacks()
+        trainer = self.create_trainer(callbacks)
+        
+        if trainer.global_rank == 0:
+            logger.info("="*70)
+            logger.info("EEG Foundation Challenge 1: Cross-Task Transfer Learning")
+            logger.info("Official Task: Predicting CCD behavioral outcomes from primary CCD EEG input.")
+            logger.info("="*70)
+            logger.info(f"Encoder Architecture: {self.encoder_type.upper()}")
         logger.info("Starting Challenge 1 training...")
         
         # Architecture-specific batch size
@@ -533,39 +525,46 @@ class Challenge1Trainer:
         
         # Create data loaders
         logger.info("Creating Challenge 1 data loaders...")
-        train_loader, val_loader, test_loader = create_challenge1_dataloaders(
+        
+        # Get CCD-only settings from config for clarity
+        use_demographics = self.config.get('challenge1', {}).get('use_demographics', False)
+        use_sus_eeg = self.config.get('challenge1', {}).get('use_sus_eeg', False)
+        
+        logger.info(f"Feature Flags: use_demographics={use_demographics}, use_sus_eeg={use_sus_eeg}")
+        
+        train_loader, val_loader = create_challenge1_dataloaders(
             data_dir=self.config['data']['data_dir'],
             config=self.config,
             batch_size=batch_size,
             num_workers=self.config['hardware']['num_workers'],
-            test_size=self.config['data']['test_split'],
-            val_size=self.config['data']['val_split']
+            use_demographics=use_demographics,
+            use_sus_eeg=use_sus_eeg
         )
         
         # Create model
         logger.info("Creating Challenge 1 model...")
         model = self.create_model()
         
-        # Create callbacks and trainer
-        callbacks = self.create_callbacks()
-        trainer = self.create_trainer(callbacks)
-        
         # Train model
-        logger.info("Training Challenge 1 model...")
-        trainer.fit(model, train_loader, val_loader)
+        if self.checkpoint_path and os.path.exists(self.checkpoint_path):
+            logger.info(f"Resuming training from checkpoint: {self.checkpoint_path}")
+            trainer.fit(model, train_loader, val_loader, ckpt_path=self.checkpoint_path)
+        else:
+            logger.info("Starting new training...")
+            trainer.fit(model, train_loader, val_loader)
         
-        # Evaluate on test set
-        logger.info("Evaluating on test set...")
+        # Evaluate on validation set (since test set is held-out)
+        logger.info("Evaluating on validation set...")
         # Ensure model is in eval mode and on the correct device
         model.eval()
         if torch.cuda.is_available():
             model = model.cuda()
-        test_metrics = self.evaluate_model(model, test_loader)
+        test_metrics = self.evaluate_model(model, val_loader)
         
         # Log final results
         logger.info("\nTRAINING COMPLETED!")
         logger.info("="*70)
-        logger.info(f"FINAL TEST RESULTS ({self.encoder_type.upper()} ENCODER):")
+        logger.info(f"FINAL VALIDATION RESULTS ({self.encoder_type.upper()} ENCODER):")
         logger.info("="*70)
         
         # Primary metric (Challenge 1 focus)
@@ -577,14 +576,6 @@ class Challenge1Trainer:
         # Secondary metrics
         if 'hit_miss_accuracy' in test_metrics:
             logger.info(f"Hit/Miss Accuracy: {test_metrics['hit_miss_accuracy']:.4f}")
-        
-        # Auxiliary metrics
-        if 'age_r2' in test_metrics:
-            logger.info(f"Age R²: {test_metrics['age_r2']:.4f}")
-            logger.info(f"   Age MAE: {test_metrics['age_mae']:.2f} years")
-        
-        if 'sex_accuracy' in test_metrics:
-            logger.info(f"Sex Accuracy: {test_metrics['sex_accuracy']:.4f}")
         
         logger.info("="*70)
         
@@ -631,6 +622,11 @@ def main():
         action='store_true',
         help='Train both CNN and Transformer for comparison'
     )
+    parser.add_argument(
+        '--resume',
+        type=str,
+        help='Resume training from checkpoint file'
+    )
     
     args = parser.parse_args()
     
@@ -655,11 +651,10 @@ def main():
     if args.debug:
         logger.info("Debug mode enabled")
         config['training']['max_epochs'] = 2
-        config['training']['batch_size'] = 4
-        config['hardware']['num_workers'] = 2
-        config['data']['train_split'] = 0.8
-        config['data']['val_split'] = 0.1
-        config['data']['test_split'] = 0.1
+        config['training']['batch_size'] = 10
+        config['hardware']['num_workers'] = 64
+        # Note: Split strategy is hardcoded according to challenge requirements
+        # Debug mode will use smaller subset of releases for faster testing
     
     # Set random seeds for reproducibility
     pl.seed_everything(config['seed'])
@@ -677,7 +672,7 @@ def main():
             config['model']['encoder_type'] = encoder_type
             
             # Create trainer and train
-            trainer = Challenge1Trainer(config)
+            trainer = Challenge1Trainer(config, checkpoint_path=args.resume)
             model, metrics = trainer.train()
             results[encoder_type] = metrics
         
@@ -696,7 +691,7 @@ def main():
         
     else:
         # Train single architecture
-        trainer = Challenge1Trainer(config)
+        trainer = Challenge1Trainer(config, checkpoint_path=args.resume)
         model, results = trainer.train()
     
     logger.info("Challenge 1 training completed successfully!")
