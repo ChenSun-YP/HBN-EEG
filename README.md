@@ -6,14 +6,30 @@ This repository implements **Challenge 1: Cross-Task Transfer Learning** from th
 
 ### Official Challenge Constraints
 
-- **Training Input**: ONLY SuS (Surround Suppression) EEG epochs
-- **Prediction Targets**: CCD (Continuous Contingent Difficulty) behavioral outcomes per trial:
+- **Primary Training Input**: CCD (Continuous Contingent Difficulty) EEG data (X1)
+- **Optional Additional Features**: 
+  - SuS (Surround Suppression) EEG data (X2)
+  - Demographics and psychopathology factors (P)
+- **Prediction Targets**: CCD behavioral outcomes per trial:
   - Response time (regression)
   - Hit/miss accuracy (binary classification)
-  - Age (auxiliary regression)
-  - Sex (auxiliary classification)
-- **Constraint**: CCD EEG data is NOT provided and NOT allowed for training
-- **Architecture**: Shared encoder with 4 prediction heads
+- **Architecture**: Shared encoder with 2 prediction heads (primary targets only)
+
+## Official Challenge 1 Data Structure
+
+According to the official challenge specification:
+
+```
+X1 ∈ ℝ^(c×n×t1): CCD EEG recording (c=128 channels, n≈70 epochs, t1=2 seconds)
+X2 ∈ ℝ^(c×t2): SuS EEG recording (c=128 channels, t2=total number of SuS trials) [OPTIONAL]
+P ∈ ℝ^7: Subject traits (3 demographics + 4 psychopathology factors) [OPTIONAL]
+Y: CCD behavioral outcomes (response time, hit/miss) for each trial
+```
+
+**Primary Input (X1)**: CCD EEG data with 128 channels, approximately 70 epochs of 2 seconds each
+**Optional Features (X2)**: SuS EEG data as additional features
+**Optional Features (P)**: Demographics (age, sex, handedness) and psychopathology factors (p-factor, internalizing, externalizing, attention)
+**Targets (Y)**: CCD behavioral outcomes per trial (response time, hit/miss)
 
 ## Model Architecture
 
@@ -21,17 +37,14 @@ This repository implements **Challenge 1: Cross-Task Transfer Learning** from th
 Our implementation uses the **per-trial approach** as described in the challenge paper:
 
 ```
-SuS EEG (2s pre-trial) → Shared Encoder → 4 Prediction Heads
+CCD EEG (2s per trial) → Shared Encoder → 2 Prediction Heads
                                     ├─ Response Time (regression)
-                                    ├─ Hit/Miss (binary classification)
-                                    ├─ Age (regression)
-                                    └─ Sex (classification)
+                                    └─ Hit/Miss (binary classification)
 ```
 
-**Example**: A participant shows strong visual cortex activation during a SuS trial with high contrast suppression. The shared encoder learns this neural signature. The model then predicts that this participant will have:
-- Fast response time (450ms) on the corresponding CCD trial
+**Example**: A participant shows strong visual cortex activation during a CCD trial with high contrast change. The shared encoder learns this neural signature. The model then predicts that this participant will have:
+- Fast response time (450ms) on the CCD trial
 - High hit probability (0.85) for detecting the contrast change
-- Estimated age (16.2 years) and sex (female) from auxiliary heads
 
 ### Encoder Options
 
@@ -66,20 +79,11 @@ EEG Patches → Patch Embedding → Positional Encoding → Transformer Layers �
 The model uses **multi-task learning** with weighted loss functions:
 
 ```python
-Total Loss = Σ(weight_i × task_loss_i) + auxiliary_losses
+Total Loss = Σ(weight_i × task_loss_i)
 
 # Primary Tasks (CCD behavioral outcomes)
-- Response Time: MSE Loss (weight: 0.4)
-- Hit/Miss: Cross-Entropy Loss (weight: 0.4)
-
-# Auxiliary Tasks (demographics)
-- Age: MSE Loss (weight: 0.1)
-- Sex: Cross-Entropy Loss (weight: 0.1)
-
-# Auxiliary Losses (for better learning)
-- Sparsity Loss: L1 regularization on head weights
-- Task Vector Loss: Encourages different learning directions
-- Gradient Conflict Loss: Mitigates conflicting gradients
+- Response Time: MSE Loss (weight: 0.5)
+- Hit/Miss: Cross-Entropy Loss (weight: 0.5)
 ```
 
 ## Data Preparation
@@ -93,23 +97,24 @@ HBN_BIDS_EEG/
 ├── cmi_bids_R1/     # Release 1
 ├── cmi_bids_R2/     # Release 2
 ├── ...
-└── cmi_bids_R9/     # Release 9
+└── cmi_bids_R11/    # Release 11
 ```
 
-### Per-Trial Matching Process
+### Per-Trial Data Loading Process
 
-1. **Load SuS EEG Data**: Extract 2-second pre-trial epochs
-2. **Load CCD Behavioral Data**: Extract trial-level outcomes
-3. **Temporal Alignment**: Match SuS epochs with CCD contrast change times
-4. **Create Per-Trial Samples**: Each sample = (SuS EEG, CCD outcomes)
+1. **Load CCD EEG Data**: Extract 2-second epochs aligned to contrast change events
+2. **Load CCD Behavioral Data**: Extract trial-level outcomes (response time, hit/miss)
+3. **Optional SuS EEG**: Load SuS EEG data as additional features
+4. **Optional Demographics**: Load age, sex, handedness, and psychopathology factors
+5. **Create Per-Trial Samples**: Each sample = (CCD EEG, optional features, targets)
 
 ### Data Preprocessing Pipeline
 
 ```mermaid
 graph TD
-    A[Raw EEG Data] --> B[Filter 0.5-70 Hz]
+    A[Raw CCD EEG Data] --> B[Filter 0.5-70 Hz]
     B --> C[Resample to 256 Hz]
-    C --> D[Extract 2s Pre-trial Epochs]
+    C --> D[Extract 2s Epochs]
     D --> E[Z-score Normalization]
     E --> F[Per-Trial Dataset]
 ```
@@ -117,8 +122,9 @@ graph TD
 **Preprocessing Steps:**
 - **Filtering**: 0.5-70 Hz bandpass filter
 - **Resampling**: 256 Hz (EEGPT standard)
-- **Epoch Length**: 2 seconds (pre-trial duration)
+- **Epoch Length**: 2 seconds (CCD trial duration)
 - **Normalization**: Z-score per channel
+- **Channel Count**: 128 channels (EEG Foundation Challenge standard)
 
 ### Data Augmentation
 
@@ -134,11 +140,13 @@ graph TD
 ### Training Configuration
 
 ```yaml
-# Key Training Parameters
-max_epochs: 80
-batch_size: 32 (CNN) / 16 (Transformer)
-learning_rate: 1e-3 (CNN) / 5e-4 (Transformer)
-warmup_epochs: 5 (CNN) / 10 (Transformer)
+# Key Training Parameters (Updated for Stability)
+max_epochs: 100
+batch_size: 4 (reduced for stability)
+learning_rate: 5e-5 (reduced for numerical stability)
+warmup_epochs: 10 (increased for transformer stability)
+gradient_clip_val: 0.5 (reduced for stability)
+response_time_scale: 1.0 (no scaling needed)
 ```
 
 ### Learning Rate Scheduling
@@ -157,8 +165,8 @@ else:
 ### Hardware Optimization
 
 - **Mixed Precision**: 16-bit training for memory efficiency
-- **Gradient Clipping**: 1.0 for transformer stability
-- **Parallel Processing**: 64 workers for data loading
+- **Gradient Clipping**: 0.5 for transformer stability
+- **Parallel Processing**: 4 workers for data loading (reduced for stability)
 - **GPU Memory**: 6GB (CNN) / 12GB (Transformer) recommended
 
 ## Performance Optimization
@@ -174,7 +182,7 @@ Speedup: 3-8x faster than sequential processing
 
 ### Memory Management
 
-- **Batch Size**: Adaptive based on GPU memory
+- **Batch Size**: 4 (reduced for stability)
 - **Gradient Checkpointing**: Optional for memory efficiency
 - **Persistent Workers**: Keep data loader workers alive
 - **Pin Memory**: Optimize GPU transfer
@@ -182,11 +190,38 @@ Speedup: 3-8x faster than sequential processing
 ### Quick Test Mode
 
 For development and debugging:
-```python
+```yaml
 quick_test:
   enabled: true
-  max_subjects: 5
-  bids_dirs: ["cmi_bids_R1"]
+  max_subjects: 3
+  bids_dirs: ["cmi_bids_R1", "cmi_bids_R2"]
+```
+
+## Numerical Stability
+
+### Recent Improvements
+
+The codebase has been updated with comprehensive numerical stability measures:
+
+1. **NaN/Inf Prevention**: Comprehensive validation at all levels
+2. **Model Architecture**: Reduced complexity for better stability
+3. **Training Parameters**: Conservative settings for reliable training
+4. **Data Validation**: Checks for invalid values in data loading
+5. **Safe Fallbacks**: Default values when invalid metrics are detected
+
+### Configuration Defaults
+
+```yaml
+# Safe defaults for Challenge 1 compliance
+challenge1:
+  use_sus_eeg: false         # SuS EEG disabled by default
+  use_demographics: false    # Demographics disabled by default
+
+# Numerical stability settings
+training:
+  learning_rate: 5e-5       # Conservative learning rate
+  gradient_clip_val: 0.5    # Reduced gradient clipping
+  response_time_scale: 1.0  # No scaling needed
 ```
 
 ## Evaluation Metrics
@@ -195,20 +230,17 @@ quick_test:
 - **Response Time**: R² score (main challenge metric)
 - **Hit/Miss**: Accuracy and F1-score
 
-### Secondary Metrics
-- **Age**: R² score
-- **Sex**: Accuracy
-
 ### Cross-Validation
-- **Strategy**: Subject-stratified 5-fold CV
-- **Splitting**: Subject-level to avoid data leakage
+- **Strategy**: Release-based splits (train on R1-11 excluding R5, val on R5)
+- **Splitting**: Release-level to avoid data leakage
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 Project/
 ├── train_challenge1.py              # Main training script
 ├── requirements.txt                 # Dependencies
+├── FIXES_SUMMARY.md                # Summary of recent fixes
 ├── src/
 │   ├── models/
 │   │   └── challenge1_baseline.py   # CNN + Transformer models
@@ -248,12 +280,6 @@ pip install -r requirements.txt
 ```bash
 # Train with Transformer encoder (recommended)
 python train_challenge1.py --config src/configs/challenge1_config.yaml --encoder transformer
-
-# Train with CNN encoder
-python train_challenge1.py --encoder cnn
-
-# Quick test mode
-python train_challenge1.py --quick-test
 ```
 
 ### 4. Configuration
@@ -267,10 +293,10 @@ Edit `src/configs/challenge1_config.yaml` to customize:
 ## Key Features
 
 ### Challenge Compliance
-- **Per-trial approach**: Matches SuS EEG with CCD behavioral outcomes
-- **No CCD EEG usage**: Only SuS EEG for training
-- **Multi-task learning**: 4 prediction heads as required
-- **Subject-level splitting**: Prevents data leakage
+- **CCD EEG as primary input**: Uses CCD EEG data (X1) as main training input
+- **Optional additional features**: SuS EEG (X2) and demographics (P) are properly marked as optional
+- **Multi-task learning**: 2 prediction heads for primary targets
+- **Release-based splitting**: Train on R1-11 excluding R5, val on R5
 
 ### Performance Optimizations
 - **Parallel processing**: 3-8x speedup in data loading
@@ -280,15 +306,16 @@ Edit `src/configs/challenge1_config.yaml` to customize:
 
 ### Robust Architecture
 - **Dual encoders**: CNN and Transformer options
-- **Advanced losses**: Sparsity, task vectors, gradient conflicts
+- **Advanced losses**: Multi-task learning with weighted losses
 - **Comprehensive validation**: Multiple metrics and cross-validation
 - **Reproducibility**: Deterministic training and proper seeding
+- **Numerical stability**: Comprehensive NaN/Inf prevention
 
 ## Expected Performance
 
 Based on the challenge paper and our implementation:
 
-### Quick Test (5 subjects)
+### Quick Test (3 subjects)
 - **Processing Time**: 30-60 seconds
 - **Samples**: ~300-500 per-trial samples
 - **Memory Usage**: ~2-4 GB
@@ -305,7 +332,7 @@ Based on the challenge paper and our implementation:
 1. **Memory Errors**
    ```bash
    # Reduce batch size in config
-   batch_size: 16  # or 8 for very limited memory
+   batch_size: 4  # or 2 for very limited memory
    ```
 
 2. **Slow Data Loading**
@@ -318,10 +345,16 @@ Based on the challenge paper and our implementation:
 
 3. **Training Instability (Transformer)**
    ```bash
-   # Reduce learning rate and increase warmup
-   learning_rate: 5e-4
+   # Current settings are optimized for stability
+   learning_rate: 5e-5
    warmup_epochs: 10
-   gradient_clip_val: 1.0
+   gradient_clip_val: 0.5
+   ```
+
+4. **NaN/Inf Errors**
+   ```bash
+   # These should be resolved with recent fixes
+   # Check FIXES_SUMMARY.md for details
    ```
 
 ### Debug Mode
@@ -330,6 +363,26 @@ Based on the challenge paper and our implementation:
 import logging
 logging.basicConfig(level=logging.DEBUG)
 ```
+
+## Recent Updates
+
+### Numerical Stability Fixes
+- Comprehensive NaN/Inf prevention at all levels
+- Reduced model complexity for better stability
+- Conservative training parameters
+- Safe fallback values for invalid metrics
+
+### Configuration Improvements
+- Safe defaults for Challenge 1 compliance
+- Quick test mode enabled by default
+- Reduced batch size and learning rate for stability
+- Proper feature flag defaults
+
+### Code Quality
+- Enhanced error handling and validation
+- Improved logging and debugging
+- Better documentation and comments
+- Comprehensive test suite
 
 ## References
 
@@ -355,8 +408,9 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 For issues and questions:
 - Check the troubleshooting section
 - Review the configuration guide
+- Check `FIXES_SUMMARY.md` for recent fixes
 - Create an issue on GitHub
 
 ---
 
-**Note**: This implementation follows the official challenge constraints and uses the per-trial approach as described in the EEG Foundation Challenge paper. The model is designed to predict CCD behavioral outcomes using only SuS EEG data, demonstrating cross-task transfer learning capabilities.
+**Note**: This implementation follows the official challenge constraints and uses CCD EEG data as the primary input (X1) with optional SuS EEG (X2) and demographics (P) as additional features. The model is designed to predict CCD behavioral outcomes using the per-trial approach as described in the EEG Foundation Challenge paper. Recent updates focus on numerical stability and reliable training.
