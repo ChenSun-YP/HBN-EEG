@@ -3,16 +3,23 @@ EEG Foundation Challenge Data Loader
 Supports both Challenge 1 (Cross-Task) and Challenge 2 (Psychopathology)
 
 CHALLENGE 1 OFFICIAL CONSTRAINTS:
-- Training Input: ONLY SuS (Surround Suppression) EEG epochs
+- Training Input: CCD EEG data (X1) as primary input
+- Optional Additional Features: SuS EEG data (X2) and demographics/psychopathology (P)
 - Prediction Targets: CCD behavioral outcomes per trial:
   * Response time (regression)
   * Hit/miss accuracy (binary classification)
-  * Age (auxiliary regression)
-  * Sex (auxiliary classification)
-- Constraint: CCD EEG data is NOT provided and NOT allowed for training
 
-Per-trial approach: Extract per-trial samples (not subject-level aggregation)
-Match SuS pre-trial EEG epochs (2 seconds before contrast change) with CCD behavioral outcomes
+Official Challenge 1 Data Structure:
+- X1 ∈ ℝ^(c×n×t1): CCD EEG recording (c=128 channels, n≈70 epochs, t1=2 seconds)
+- X2 ∈ ℝ^(c×t2): SuS EEG recording (c=128 channels, t2=total number of SuS trials)
+- P ∈ ℝ^7: Subject traits (3 demographics + 4 psychopathology factors)
+- Y: CCD behavioral outcomes (response time, hit/miss) for each trial
+
+EEG Foundation Challenge Requirements:
+- Use 128 channels (standard EEG layout)
+- Include psychopathology factors (p_factor, attention, internalizing, externalizing)
+- Include handedness (ehq_total), age, and sex
+- Release-based splits: R1-11 excluding R5 for train, R5 for val
 """
 
 import os
@@ -34,6 +41,8 @@ from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 import multiprocessing
 from functools import partial
 import time
+from bids import BIDSLayout
+import mne_bids
 
 # We'll handle boundary events properly instead of ignoring warnings
 
@@ -49,20 +58,30 @@ logger = logging.getLogger(__name__)
 
 class Challenge1Dataset(Dataset):
     """
-    Per-trial dataset for EEG Foundation Challenge 1
+    Challenge 1 dataset compliant with official EEG Foundation Challenge requirements
     
     Creates samples where:
-    - X (Input): SuS EEG pre-trial epoch (2 seconds before CCD contrast change) + demographics
-    - Y (Target): CCD behavioral outcome (response_time, hit_miss, age, sex) for that specific trial
+    - X1 (Primary Input): CCD EEG epochs (2 seconds per trial)
+    - X2 (Optional): SuS EEG data as additional features
+    - P (Optional): Demographics and psychopathology factors
+    - Y (Target): CCD behavioral outcomes (response_time, hit_miss) for each trial
     
-    Each sample corresponds to one CCD trial with matching SuS pre-trial EEG data.
+    Each sample corresponds to one CCD trial with its associated EEG data and CCD behavioral outcome.
+    
+    EEG Foundation Challenge Requirements:
+    - Use 128 channels (standard EEG layout)
+    - Include psychopathology factors (p_factor, attention, internalizing, externalizing)
+    - Include handedness (ehq_total), age, and sex
+    - Release-based splits: R1-11 excluding R5 for train, R5 for val
     """
     
     def __init__(self, data_dir: str, config: Dict[str, Any], split: str = 'train', 
                  subject_split: Optional[Dict[str, List[str]]] = None, transforms=None, 
-                 samples: Optional[List] = None):
+                 samples: Optional[List] = None, releases: Optional[List[str]] = None,
+                 use_demographics: bool = True, use_sus_eeg: bool = False,
+                 shared_layouts: Optional[Dict[str, Any]] = None):
         """
-        Initialize per-trial dataset
+        Initialize Challenge 1 dataset
         
         Args:
             data_dir: Path to HBN BIDS EEG dataset
@@ -71,17 +90,28 @@ class Challenge1Dataset(Dataset):
             subject_split: Optional pre-defined subject splits
             transforms: Optional transforms to apply
             samples: Pre-processed samples (for reuse)
+            releases: Specific releases for this split
+            use_demographics: Whether to include demographics and psychopathology as additional features
+            use_sus_eeg: Whether to include SuS EEG data as additional features
         """
         self.data_dir = Path(data_dir)
         self.config = config
         self.split = split
         self.subject_split = subject_split
         self.transforms = transforms
+        self.releases = releases  # Specific releases for this split
+        self.use_demographics = use_demographics
+        self.use_sus_eeg = use_sus_eeg
+        self.shared_layouts = shared_layouts
         
         # Get dataset configuration
-        self.channel_count = config['data']['channel_count']
+        self.channel_count = config['data']['channel_count']  # Should be 128
         self.sampling_rate = config['data']['sampling_rate']
-        self.pre_trial_duration = 2.0  # 2 seconds as specified in paper
+        self.epoch_duration = 2.0  # 2 seconds per CCD epoch as specified
+        
+        # Validate channel count
+        if self.channel_count != 128:
+            logger.warning(f"Channel count should be 128 for EEG Foundation Challenge, got {self.channel_count}")
         
         # If samples are provided, use them directly (for reuse)
         if samples is not None:
@@ -101,8 +131,8 @@ class Challenge1Dataset(Dataset):
         
         # Parallel processing configuration
         self.use_parallel = config.get('parallel', {}).get('enabled', True)
-        self.max_workers = config.get('parallel', {}).get('max_workers', min(64, multiprocessing.cpu_count()))
-        self.batch_size = config.get('parallel', {}).get('batch_size', 10)  # Process subjects in batches
+        self.max_workers = config.get('parallel', {}).get('max_workers', multiprocessing.cpu_count())
+        self.batch_size = config.get('parallel', {}).get('batch_size', 100)  # Process subjects in batches
         
         logger.info(f"Parallel processing: {'enabled' if self.use_parallel else 'disabled'}")
         if self.use_parallel:
@@ -111,18 +141,30 @@ class Challenge1Dataset(Dataset):
         # Setup preprocessing
         self._setup_preprocessing()
         
-        # Load metadata
-        self.metadata = self._load_metadata()
+        # Initialize BIDS layout for file discovery (use shared layouts if provided)
+        if self.shared_layouts is not None:
+            logger.info(f"Using shared BIDS layouts for {split} split")
+            self.layouts = self.shared_layouts
+            # Keep a reference to the first layout for backward compatibility
+            if self.layouts:
+                self.layout = list(self.layouts.values())[0]
+            else:
+                self.layout = None
+        else:
+            self._setup_bids_layout()
         
-        # Create per-trial samples
+        # Load metadata and create quality control whitelist
+        self.metadata, self.qc_whitelist = self._load_metadata_and_qc()
+        
+        # Create samples
         self.samples = []
-        self._create_per_trial_samples()
+        self._create_samples()
         
         # Save to cache (if enabled)
         if cache_enabled:
             self._save_to_cache(cache_file)
         
-        logger.info(f"Created {len(self.samples)} per-trial samples for {split} split")
+        logger.info(f"Created {len(self.samples)} samples for {split} split")
     
     def _setup_preprocessing(self):
         """Setup preprocessing parameters"""
@@ -135,41 +177,290 @@ class Challenge1Dataset(Dataset):
         
         self.resample_freq = preprocess_config.get('resample_freq', 256)
     
-    def _load_metadata(self) -> Dict[str, pd.DataFrame]:
-        """Load BIDS metadata for all releases"""
+    def _setup_bids_layout(self):
+        """Initialize BIDS layouts for all release directories"""
+        try:
+            # Discover all release directories
+            release_dirs = []
+            for d in self.data_dir.iterdir():
+                if d.is_dir() and d.name.startswith('cmi_bids_R'):
+                    release_dirs.append(str(d))
+            
+            logger.info(f"Found {len(release_dirs)} release directories: {[Path(d).name for d in release_dirs]}")
+            
+            # Initialize individual BIDS layouts for each release
+            # This approach works reliably and gives access to all subjects
+            self.layouts = {}
+            total_subjects = 0
+            
+            for release_dir in release_dirs:
+                try:
+                    layout = BIDSLayout(release_dir)
+                    subjects = layout.get_subjects()
+                    self.layouts[release_dir] = layout
+                    total_subjects += len(subjects)
+                    logger.info(f"✅ {Path(release_dir).name}: {len(subjects)} subjects")
+                except Exception as e:
+                    logger.warning(f"Failed to initialize layout for {release_dir}: {e}")
+            
+            logger.info(f"BIDS layouts initialized successfully: {len(self.layouts)} releases, {total_subjects} total subjects")
+            
+            # Keep a reference to the first layout for backward compatibility
+            if self.layouts:
+                self.layout = list(self.layouts.values())[0]
+            else:
+                logger.warning("No BIDS layouts initialized")
+                self.layout = None
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize BIDS layouts: {e}")
+            self.layouts = {}
+            self.layout = None
+    
+    def _load_metadata_and_qc(self) -> Tuple[Dict[str, pd.DataFrame], pd.DataFrame]:
+        """
+        Load BIDS metadata and quality control information
+        
+        Returns:
+            Tuple of (metadata_dict, qc_whitelist_dataframe)
+        """
         metadata = {}
+        qc_dataframes = []
         
         # Check if quick test mode is enabled
         quick_test = self.config.get('quick_test', {})
         quick_test_enabled = quick_test.get('enabled', False)
         allowed_bids_dirs = quick_test.get('bids_dirs', None) if quick_test_enabled else None
         
-        for release_dir in self.data_dir.iterdir():
-            if not release_dir.is_dir() or not release_dir.name.startswith('cmi_bids_'):
-                logger.warning(f"Skipping non-BIDS directory: {release_dir}")
+        # Determine which releases to load
+        if self.releases is not None:
+            # Use specified releases for this split
+            releases_to_load = self.releases
+            logger.info(f"Loading metadata for specified releases: {releases_to_load}")
+        elif quick_test_enabled and allowed_bids_dirs:
+            # Quick test mode
+            releases_to_load = allowed_bids_dirs
+            logger.info(f"Quick test mode: Loading metadata for {releases_to_load}")
+        else:
+            # Load all available releases
+            releases_to_load = [d.name for d in self.data_dir.iterdir() 
+                              if d.is_dir() and d.name.startswith('cmi_bids_R')]
+            logger.info(f"Loading metadata for all available releases: {releases_to_load}")
+        
+        for release_name in releases_to_load:
+            release_dir = self.data_dir / release_name
+            
+            if not release_dir.exists():
+                logger.warning(f"Release directory not found: {release_dir}")
                 continue
             
-            # In quick test mode, only load specified BIDS directories
-            if quick_test_enabled and allowed_bids_dirs and release_dir.name not in allowed_bids_dirs:
-                logger.warning(f"Skipping BIDS directory not in quick test mode: {release_dir}")
-                continue
-                
+            # Load participants.tsv
             participants_file = release_dir / 'participants.tsv'
             if participants_file.exists():
                 df = pd.read_csv(participants_file, sep='\t')
-                metadata[release_dir.name] = df
-                logger.info(f"Loaded metadata for {release_dir.name}: {len(df)} participants")
+                metadata[release_name] = df
+                logger.info(f"Loaded metadata for {release_name}: {len(df)} participants")
+            else:
+                logger.warning(f"No participants.tsv found in {release_name}")
+            
+            # Load quality control files
+            code_dir = release_dir / 'code'
+            if code_dir.exists():
+                qc_files = list(code_dir.glob('*_quality_table.tsv'))
+                for qc_file in qc_files:
+                    try:
+                        # Read QC file as CSV (files are comma-separated despite .tsv extension)
+                        qc_df = pd.read_csv(qc_file, sep=',')
+                        qc_df['release'] = release_name
+                        qc_df['qc_file'] = qc_file.name
+                        qc_dataframes.append(qc_df)
+                        logger.info(f"Loaded QC data from {qc_file.name}: {len(qc_df)} entries")
+                    except Exception as e:
+                        logger.warning(f"Failed to load QC file {qc_file}: {e}")
         
-        return metadata
+        # Combine all QC dataframes
+        if qc_dataframes:
+            qc_combined = pd.concat(qc_dataframes, ignore_index=True)
+            # Filter for valid recordings (key_events_exist == 1)
+            qc_whitelist = qc_combined[qc_combined['key_events_exist'] == 1].copy()
+            logger.info(f"QC whitelist created: {len(qc_whitelist)} valid recordings from {len(qc_combined)} total")
+        else:
+            qc_whitelist = pd.DataFrame()
+            logger.warning("No QC files found, proceeding without quality control filtering")
+        
+        return metadata, qc_whitelist
     
-    def _create_per_trial_samples(self):
-        """Create per-trial samples by matching SuS pre-trial EEG with CCD behavioral outcomes"""
+    def _create_samples(self):
+        """Create samples using CCD EEG data as primary input"""
         
         # Check if quick test mode is enabled
         quick_test = self.config.get('quick_test', {})
         quick_test_enabled = quick_test.get('enabled', False)
         max_subjects = quick_test.get('max_subjects', None) if quick_test_enabled else None
-        subjects_processed = 0
+        
+        # Use BIDS layout to discover files if available
+        if self.layout is not None:
+            self._create_samples_with_bids()
+        else:
+            self._create_samples_manual()
+    
+    def _create_samples_with_bids(self):
+        """Create samples using BIDS layouts for file discovery for current split releases"""
+        logger.info(f"Using BIDS layouts for file discovery for {self.split} split releases")
+        
+        # Get all CCD files from BIDS layouts for current split releases only
+        ccd_files = []
+        sus_files = []
+        
+        # Determine which releases to process for this split
+        if self.releases is not None:
+            # Use specified releases for this split
+            releases_to_process = self.releases
+            logger.info(f"Processing specified releases for {self.split} split: {releases_to_process}")
+        else:
+            # Fallback: process all available releases
+            releases_to_process = [Path(release_dir).name for release_dir in self.layouts.keys()]
+            logger.info(f"Processing all available releases for {self.split} split: {releases_to_process}")
+        
+        # Only process releases needed for this split
+        for release_dir, layout in self.layouts.items():
+            release_name = Path(release_dir).name
+            
+            # Skip if this release is not needed for the current split
+            if release_name not in releases_to_process:
+                logger.debug(f"Skipping {release_name} (not needed for {self.split} split)")
+                continue
+            
+            try:
+                # Get CCD files from this release
+                release_ccd_files = layout.get(
+                    task='contrastChangeDetection',
+                    suffix='eeg',
+                    extension='.set',
+                    return_type='filename'
+                )
+                ccd_files.extend(release_ccd_files)
+                
+                # Get SuS files if using as additional features (X2)
+                if self.use_sus_eeg:
+                    release_sus_files = layout.get(
+                        task='surroundSupp',
+                        suffix='eeg',
+                        extension='.set',
+                        return_type='filename'
+                    )
+                    sus_files.extend(release_sus_files)
+                
+                logger.info(f"✅ {release_name}: {len(release_ccd_files)} CCD files, {len(release_sus_files) if self.use_sus_eeg else 0} SuS files")
+                
+            except Exception as e:
+                logger.warning(f"Failed to get files from {release_dir}: {e}")
+        
+        logger.info(f"Found {len(ccd_files)} total CCD files and {len(sus_files)} total SuS files for {self.split} split")
+        
+        # Create subject mapping
+        subject_files = {}
+        for file_path in ccd_files + sus_files:
+            # Extract BIDS entities from file path manually
+            try:
+                path = Path(file_path)
+                parts = path.parts
+                
+                # Extract release (e.g., "cmi_bids_R1" from path)
+                release = parts[-4] if len(parts) >= 4 else 'unknown'
+                
+                # Extract subject from filename
+                filename = path.name
+                subject_id = filename.split('_')[0] if filename.startswith('sub-') else 'unknown'
+                
+                # Extract task and run from filename
+                task = 'unknown'
+                run = None
+                
+                if '_task-' in filename:
+                    task_start = filename.find('_task-') + 6
+                    task_end = filename.find('_', task_start)
+                    if task_end == -1:
+                        task_end = filename.find('.', task_start)
+                    task = filename[task_start:task_end] if task_end != -1 else filename[task_start:]
+                
+                if '_run-' in filename:
+                    run_start = filename.find('_run-') + 5
+                    run_end = filename.find('_', run_start)
+                    if run_end == -1:
+                        run_end = filename.find('.', run_start)
+                    run = filename[run_start:run_end] if run_end != -1 else filename[run_start:]
+                
+            except Exception as e:
+                logger.warning(f"Failed to parse BIDS entities from {file_path}: {e}")
+                continue
+            
+            if subject_id not in subject_files:
+                subject_files[subject_id] = {'ccd_files': [], 'sus_files': []}
+            
+            if task == 'contrastChangeDetection':
+                subject_files[subject_id]['ccd_files'].append(file_path)
+            elif task == 'surroundSupp':
+                subject_files[subject_id]['sus_files'].append(file_path)
+        
+        # Process subjects
+        all_subjects = []
+        for subject_id, files in subject_files.items():
+            if not files['ccd_files']:  # Must have CCD data
+                continue
+            
+            # Get participant metadata
+            participant = self._get_participant_metadata(subject_id)
+            if participant is None:
+                continue
+            
+            # Check QC whitelist if available
+            if not self.qc_whitelist.empty:
+                if not self._is_subject_in_qc_whitelist(subject_id):
+                    logger.debug(f"Subject {subject_id} not in QC whitelist, skipping")
+                    continue
+            
+            # Determine release from BIDS path
+            release = None
+            if files['ccd_files']:
+                try:
+                    # Extract release from file path manually
+                    file_path = Path(files['ccd_files'][0])
+                    parts = file_path.parts
+                    release = parts[-4] if len(parts) >= 4 else 'unknown'
+                except Exception as e:
+                    logger.warning(f"Failed to extract release from {files['ccd_files'][0]}: {e}")
+                    release = 'unknown'
+            
+            all_subjects.append({
+                'subject_id': subject_id,
+                'ccd_files': files['ccd_files'],
+                'sus_files': files['sus_files'],
+                'participant': participant,
+                'release': release
+            })
+        
+        logger.info(f"Processing {len(all_subjects)} subjects with valid data...")
+        
+        # Process subjects in parallel or sequentially
+        if self.use_parallel and len(all_subjects) > 1:
+            self._process_subjects_parallel(all_subjects)
+        else:
+            self._process_subjects_sequential(all_subjects)
+        
+        # Quick test mode check
+        if self.config.get('quick_test', {}).get('enabled', False):
+            max_subjects = self.config['quick_test'].get('max_subjects', 5)
+            if len(all_subjects) > max_subjects:
+                logger.info(f"Quick test mode: limiting to {max_subjects} subjects")
+                # Limit the samples to only the first max_subjects
+                total_samples_before = len(self.samples)
+                self.samples = self.samples[:max_subjects * 50]  # Approximate samples per subject
+                logger.info(f"Quick test mode: reduced samples from {total_samples_before} to {len(self.samples)}")
+    
+    def _create_samples_manual(self):
+        """Create samples using manual file discovery (fallback)"""
+        logger.info("Using manual file discovery")
         
         # Collect all subjects to process
         all_subjects = []
@@ -177,45 +468,36 @@ class Challenge1Dataset(Dataset):
             release_path = self.data_dir / release
             
             for _, participant in metadata_df.iterrows():
-                # Check if we've reached the subject limit in quick test mode
-                if max_subjects and subjects_processed >= max_subjects:
-                    logger.info(f"Quick test mode: stopping after {subjects_processed} subjects")
-                    break
-                
                 subject_id = participant['participant_id']
                 
                 # Apply subject split if provided
                 if self.subject_split:
                     if subject_id not in self.subject_split[self.split]:
-                        logger.info(f"Subject {subject_id} not in {self.split} split")
                         continue
                 
                 subject_dir = release_path / subject_id / 'eeg'
                 
                 if not subject_dir.exists():
-                    logger.warning(f"Subject directory not found: {subject_dir}")
                     continue
                 
-                # Find SuS and CCD files for this subject
-                sus_files = self._find_sus_files(subject_dir)
+                # Find CCD files (primary input)
                 ccd_files = self._find_ccd_files(subject_dir)
                 
-                if not sus_files or not ccd_files:
-                    logger.warning(f"Missing SuS or CCD files for {subject_id}")
+                # Find SuS files (optional additional features)
+                sus_files = []
+                if self.use_sus_eeg:
+                    sus_files = self._find_sus_files(subject_dir)
+                
+                if not ccd_files:  # Must have CCD data
                     continue
                 
                 all_subjects.append({
                     'subject_id': subject_id,
-                    'sus_files': sus_files,
                     'ccd_files': ccd_files,
+                    'sus_files': sus_files,
                     'participant': participant,
                     'release': release
                 })
-                subjects_processed += 1
-                
-            if max_subjects and subjects_processed >= max_subjects:
-                logger.info(f"Quick test mode: stopping after {subjects_processed} subjects")
-                break
         
         logger.info(f"Processing {len(all_subjects)} subjects...")
         
@@ -224,41 +506,63 @@ class Challenge1Dataset(Dataset):
             self._process_subjects_parallel(all_subjects)
         else:
             self._process_subjects_sequential(all_subjects)
+        
+        # Quick test mode check
+        if self.config.get('quick_test', {}).get('enabled', False):
+            max_subjects = self.config['quick_test'].get('max_subjects', 5)
+            if len(all_subjects) > max_subjects:
+                logger.info(f"Quick test mode: limiting to {max_subjects} subjects")
+                # Limit the samples to only the first max_subjects
+                total_samples_before = len(self.samples)
+                self.samples = self.samples[:max_subjects * 50]  # Approximate samples per subject
+                logger.info(f"Quick test mode: reduced samples from {total_samples_before} to {len(self.samples)}")
+    
+    def _get_participant_metadata(self, subject_id: str) -> Optional[Dict]:
+        """Get participant metadata from all releases"""
+        for release, metadata_df in self.metadata.items():
+            participant_data = metadata_df[metadata_df['participant_id'] == subject_id]
+            if not participant_data.empty:
+                return participant_data.iloc[0].to_dict()
+        return None
+    
+    def _is_subject_in_qc_whitelist(self, subject_id: str) -> bool:
+        """Check if subject is in QC whitelist"""
+        if self.qc_whitelist.empty:
+            return True
+        
+        # Remove 'sub-' prefix for QC comparison
+        subject_id_clean = subject_id.replace('sub-', '')
+        return subject_id_clean in self.qc_whitelist['Row'].values
     
     def _process_subjects_parallel(self, all_subjects: List[Dict]):
-        """Process subjects in parallel for much faster data loading"""
+        """Process subjects in parallel for maximum CPU utilization"""
         start_time = time.time()
         
-        # Process subjects in batches to avoid memory issues
-        for i in range(0, len(all_subjects), self.batch_size):
-            batch = all_subjects[i:i + self.batch_size]
-            batch_start = time.time()
+        # Use ProcessPoolExecutor for true parallel processing across all CPU cores
+        # This will bypass the GIL and utilize all cores effectively
+        with ProcessPoolExecutor(max_workers=self.max_workers) as executor:
+            # Create partial function with preprocessing parameters
+            process_func = partial(
+                self._process_single_subject,
+                filter_params=self.filter_params,
+                resample_freq=self.resample_freq,
+                epoch_duration=self.epoch_duration,
+                use_demographics=self.use_demographics,
+                use_sus_eeg=self.use_sus_eeg
+            )
             
-            # Use ThreadPoolExecutor for I/O-bound operations
-            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                # Create partial function with preprocessing parameters
-                process_func = partial(
-                    self._process_single_subject,
-                    filter_params=self.filter_params,
-                    resample_freq=self.resample_freq,
-                    pre_trial_duration=self.pre_trial_duration
-                )
-                
-                # Process subjects in parallel
-                futures = [executor.submit(process_func, subject) for subject in batch]
-                
-                # Collect results
-                for future in futures:
-                    try:
-                        subject_samples = future.result()
-                        if subject_samples:
-                            self.samples.extend(subject_samples)
-                    except Exception as e:
-                        logger.error(f"Error processing subject: {e}")
+            # Process all subjects in parallel with optimal chunking
+            chunk_size = max(1, len(all_subjects) // (self.max_workers * 4))  # Dynamic chunking
             
-            batch_time = time.time() - batch_start
-            logger.info(f"Processed batch {i//self.batch_size + 1}/{(len(all_subjects) + self.batch_size - 1)//self.batch_size} "
-                       f"({len(batch)} subjects) in {batch_time:.2f}s")
+            logger.info(f"Processing {len(all_subjects)} subjects with {self.max_workers} workers, chunk_size={chunk_size}")
+            
+            # Use map with chunksize for optimal load balancing
+            results = list(executor.map(process_func, all_subjects, chunksize=chunk_size))
+            
+            # Collect all results
+            for subject_samples in results:
+                if subject_samples:
+                    self.samples.extend(subject_samples)
         
         total_time = time.time() - start_time
         logger.info(f"Parallel processing completed in {total_time:.2f}s")
@@ -270,11 +574,12 @@ class Challenge1Dataset(Dataset):
         for i, subject in enumerate(all_subjects):
             try:
                 subject_samples = self._process_single_subject(
-                    subject, self.filter_params, self.resample_freq, self.pre_trial_duration
+                    subject, self.filter_params, self.resample_freq, self.epoch_duration, 
+                    self.use_demographics, self.use_sus_eeg
                 )
                 if subject_samples:
                     self.samples.extend(subject_samples)
-                    logger.info(f"Created {len(subject_samples)} per-trial samples for {subject['subject_id']}")
+                    logger.info(f"Created {len(subject_samples)} samples for {subject['subject_id']}")
             except Exception as e:
                 logger.error(f"Error processing subject {subject['subject_id']}: {e}")
         
@@ -282,77 +587,111 @@ class Challenge1Dataset(Dataset):
         logger.info(f"Sequential processing completed in {total_time:.2f}s")
     
     @staticmethod
-    def _process_single_subject(subject_info: Dict, filter_params: Dict, resample_freq: int, pre_trial_duration: float):
+    def _process_single_subject(subject_info: Dict, filter_params: Dict, resample_freq: int, 
+                               epoch_duration: float, use_demographics: bool, use_sus_eeg: bool):
         """Process a single subject - static method for parallel processing"""
         try:
             # Extract subject information
             subject_id = subject_info['subject_id']
-            sus_files = subject_info['sus_files']
             ccd_files = subject_info['ccd_files']
+            sus_files = subject_info['sus_files']
             participant = subject_info['participant']
-            release = subject_info['release']
+            release = subject_info.get('release')
             
-            # Create per-trial samples for this subject
+            # Create samples for this subject
             subject_samples = []
             
             try:
-                # Get demographics
+                # Get demographics and psychopathology factors
                 age = participant.get('age')
                 sex = 1 if participant.get('sex') == 'F' else 0
+                handedness = participant.get('ehq_total')
+                
+                # Get psychopathology factors
+                p_factor = participant.get('p_factor')
+                attention = participant.get('attention')
+                internalizing = participant.get('internalizing')
+                externalizing = participant.get('externalizing')
+                
+                # Handle missing values
+                if handedness == 'n/a' or pd.isna(handedness):
+                    handedness = 0.0  # Default to neutral handedness
+                else:
+                    handedness = float(handedness)
+                
+                if p_factor == 'n/a' or pd.isna(p_factor):
+                    p_factor = 0.0
+                else:
+                    p_factor = float(p_factor)
+                
+                if attention == 'n/a' or pd.isna(attention):
+                    attention = 0.0
+                else:
+                    attention = float(attention)
+                
+                if internalizing == 'n/a' or pd.isna(internalizing):
+                    internalizing = 0.0
+                else:
+                    internalizing = float(internalizing)
+                
+                if externalizing == 'n/a' or pd.isna(externalizing):
+                    externalizing = 0.0
+                else:
+                    externalizing = float(externalizing)
+                
             except Exception as e:
                 logger.error(f"Error getting demographics for {subject_id}: {e}")
+                return []
 
-            # Load and concatenate all SuS EEG data for this subject
-            sus_eeg_data = []
-            sus_events = []
-            
-            for sus_file in sus_files:
-                try:
-                    # Load SuS EEG data
-                    raw = mne.io.read_raw_eeglab(str(sus_file), preload=True, verbose=False)
-                    
-                    # Apply preprocessing
-                    raw.filter(**filter_params, verbose=False)
-                    if raw.info['sfreq'] != resample_freq:
-                        raw.resample(resample_freq, verbose=False)
-                    
-                    # Get events
-                    events_file = sus_file.parent / sus_file.name.replace('_eeg.set', '_events.tsv')
-                    if events_file.exists():
-                        events_df = pd.read_csv(events_file, sep='\t')
-                        sus_events.append((raw, events_df))
-                        
-                except Exception as e:
-                    logger.warning(f"Error loading SuS file {sus_file}: {e}")
-                    continue
+            # Load SuS EEG data if requested (additional features X2)
+            sus_eeg_data = None
+            if use_sus_eeg and sus_files:
+                sus_eeg_data = Challenge1Dataset._load_sus_eeg_data(sus_files, filter_params, resample_freq)
             
             # Process each CCD file
             for ccd_file in ccd_files:
                 try:
-                    # Load CCD trials
+                    # Load CCD EEG data (primary input X1)
+                    ccd_eeg_data = Challenge1Dataset._load_ccd_eeg_data(ccd_file, filter_params, resample_freq)
+                    if ccd_eeg_data is None:
+                        continue
+                    
+                    # Load CCD trials and behavioral outcomes
                     ccd_trials = Challenge1Dataset._load_ccd_trials(ccd_file)
                     
                     # Create samples for each CCD trial
                     for trial in ccd_trials:
-                        # Find corresponding SuS pre-trial epoch
-                        sus_epoch = Challenge1Dataset._find_sus_pre_trial_epoch(
-                            sus_events, trial['onset_time'], pre_trial_duration, resample_freq
+                        # Extract CCD EEG epoch for this trial
+                        ccd_epoch = Challenge1Dataset._extract_ccd_epoch(
+                            ccd_eeg_data, trial, epoch_duration, resample_freq
                         )
                         
-                        if sus_epoch is not None:
-                            # Create sample
+                        if ccd_epoch is not None:
+                            # Create sample with CCD EEG as primary input
                             sample = {
-                                'eeg_data': sus_epoch,
+                                'ccd_eeg_data': ccd_epoch,  # Primary input X1
+                                'demographics': {
+                                    'age': age,
+                                    'sex': sex,
+                                    'handedness': handedness,
+                                    'p_factor': p_factor,
+                                    'attention': attention,
+                                    'internalizing': internalizing,
+                                    'externalizing': externalizing
+                                } if use_demographics else None,
                                 'targets': {
                                     'response_time': trial['response_time'],
-                                    'hit_miss': trial['hit_miss'],
-                                    'age': age,
-                                    'sex': sex
+                                    'hit_miss': trial['hit_miss']
                                 },
                                 'subject_id': subject_id,
                                 'trial_id': trial['trial_id'],
                                 'release': release
                             }
+                            
+                            # Only add SuS EEG data if it's actually being used
+                            if use_sus_eeg and sus_eeg_data is not None:
+                                sample['sus_eeg_data'] = sus_eeg_data
+                            
                             subject_samples.append(sample)
                             
                 except Exception as e:
@@ -365,25 +704,141 @@ class Challenge1Dataset(Dataset):
             logger.error(f"Error processing subject {subject_info['subject_id']}: {e}")
             return []
     
-    def _find_sus_files(self, subject_dir: Path) -> List[Path]:
-        """Find SuS (Surround Suppression) EEG files"""
-        sus_files = []
-        for file_path in subject_dir.glob("*task-surroundSupp*_eeg.set"):
-            sus_files.append(file_path)
-        return sorted(sus_files)
-    
-    def _find_ccd_files(self, subject_dir: Path) -> List[Path]:
-        """Find CCD (Contrast Change Detection) EEG files"""
-        ccd_files = []
-        for file_path in subject_dir.glob("*task-contrastChangeDetection*_eeg.set"):
-            ccd_files.append(file_path)
-        return sorted(ccd_files)
+    @staticmethod
+    def _load_ccd_eeg_data(ccd_file: str, filter_params: Dict, resample_freq: int) -> Optional[np.ndarray]:
+        """Load CCD EEG data from .set file"""
+        try:
+            # Load EEG data using MNE directly
+            raw = mne.io.read_raw_eeglab(ccd_file, preload=True, verbose=False)
+            
+            # Apply preprocessing
+            if filter_params:
+                raw.filter(l_freq=filter_params['l_freq'], h_freq=filter_params['h_freq'], verbose=False)
+            
+            if resample_freq:
+                raw.resample(resample_freq, verbose=False)
+            
+            # Ensure 128 channels (EEG Foundation Challenge requirement)
+            if raw.info['nchan'] != 128:
+                # More efficient channel selection - only log once per subject
+                if raw.info['nchan'] > 128:
+                    # Take first 128 channels (most common case)
+                    raw.pick(raw.ch_names[:128])
+                elif raw.info['nchan'] < 128:
+                    logger.warning(f"Not enough EEG channels ({raw.info['nchan']}), skipping")
+                    return None
+                else:
+                    # Exactly 128 channels, no action needed
+                    pass
+            
+            # Get data and apply z-score normalization
+            data = raw.get_data()
+            
+            # Check for NaN or Inf in raw data
+            if np.isnan(data).any():
+                logger.warning(f"NaN detected in raw EEG data from {ccd_file}")
+                return None
+            if np.isinf(data).any():
+                logger.warning(f"Inf detected in raw EEG data from {ccd_file}")
+                return None
+            
+            normalized_data = np.zeros_like(data)
+            for ch in range(data.shape[0]):
+                ch_data = data[ch, :]
+                if np.std(ch_data) > 1e-8:
+                    normalized_data[ch, :] = (ch_data - np.mean(ch_data)) / np.std(ch_data)
+                else:
+                    normalized_data[ch, :] = ch_data
+            
+            # Check for NaN or Inf in normalized data
+            if np.isnan(normalized_data).any():
+                logger.warning(f"NaN detected in normalized EEG data from {ccd_file}")
+                return None
+            if np.isinf(normalized_data).any():
+                logger.warning(f"Inf detected in normalized EEG data from {ccd_file}")
+                return None
+            
+            return normalized_data
+                
+        except Exception as e:
+            logger.warning(f"Error loading CCD EEG data from {ccd_file}: {e}")
+            return None
     
     @staticmethod
-    def _load_ccd_trials(ccd_file: Path) -> List[Dict[str, Any]]:
+    def _load_sus_eeg_data(sus_files: List[str], filter_params: Dict, resample_freq: int) -> Optional[np.ndarray]:
+        """Load SuS EEG data from .set files"""
+        try:
+            sus_data = []
+            
+            for sus_file in sus_files:
+                # Load EEG data using MNE directly
+                raw = mne.io.read_raw_eeglab(sus_file, preload=True, verbose=False)
+                
+                # Apply preprocessing
+                if filter_params:
+                    raw.filter(l_freq=filter_params['l_freq'], h_freq=filter_params['h_freq'], verbose=False)
+                
+                if resample_freq:
+                    raw.resample(resample_freq, verbose=False)
+                
+                # Ensure 128 channels (EEG Foundation Challenge requirement)
+                if raw.info['nchan'] != 128:
+                    # More efficient channel selection - only log once per subject
+                    if raw.info['nchan'] > 128:
+                        # Take first 128 channels (most common case)
+                        raw.pick(raw.ch_names[:128])
+                    elif raw.info['nchan'] < 128:
+                        logger.warning(f"Not enough EEG channels ({raw.info['nchan']}), skipping")
+                        continue
+                    else:
+                        # Exactly 128 channels, no action needed
+                        pass
+                
+                # Get data and apply z-score normalization
+                data = raw.get_data()
+                
+                # Check for NaN or Inf in raw data
+                if np.isnan(data).any():
+                    logger.warning(f"NaN detected in raw SuS EEG data from {sus_file}")
+                    continue
+                if np.isinf(data).any():
+                    logger.warning(f"Inf detected in raw SuS EEG data from {sus_file}")
+                    continue
+                
+                normalized_data = np.zeros_like(data)
+                for ch in range(data.shape[0]):
+                    ch_data = data[ch, :]
+                    if np.std(ch_data) > 1e-8:
+                        normalized_data[ch, :] = (ch_data - np.mean(ch_data)) / np.std(ch_data)
+                    else:
+                        normalized_data[ch, :] = ch_data
+                
+                # Check for NaN or Inf in normalized data
+                if np.isnan(normalized_data).any():
+                    logger.warning(f"NaN detected in normalized SuS EEG data from {sus_file}")
+                    continue
+                if np.isinf(normalized_data).any():
+                    logger.warning(f"Inf detected in normalized SuS EEG data from {sus_file}")
+                    continue
+                
+                sus_data.append(normalized_data)
+            
+            # Concatenate all SuS data
+            if sus_data:
+                return np.concatenate(sus_data, axis=1)  # Concatenate along time dimension
+            else:
+                return None
+                
+        except Exception as e:
+            logger.warning(f"Error loading SuS EEG data: {e}")
+            return None
+    
+    @staticmethod
+    def _load_ccd_trials(ccd_file: str) -> List[Dict[str, Any]]:
         """Load CCD trials from events file"""
         try:
-            events_file = ccd_file.parent / ccd_file.name.replace('_eeg.set', '_events.tsv')
+            # Load events file for CCD task
+            events_file = Path(ccd_file).parent / Path(ccd_file).name.replace('_eeg.set', '_events.tsv')
             
             if not events_file.exists():
                 logger.warning(f"Events file not found: {events_file}")
@@ -405,7 +860,6 @@ class Challenge1Dataset(Dataset):
                     current_trial = {
                         'trial_id': trial_id,
                         'start_time': onset_time,
-                        'onset_time': onset_time,  # For compatibility
                         'contrast_change_time': None,
                         'button_press_time': None,
                         'response_time': None,
@@ -416,7 +870,6 @@ class Challenge1Dataset(Dataset):
                 # Detect target (contrast change)
                 elif 'target' in event_value and current_trial is not None:
                     current_trial['contrast_change_time'] = onset_time
-                    current_trial['onset_time'] = onset_time  # Update with actual contrast change time
                 
                 # Detect button press
                 elif 'buttonPress' in event_value and current_trial is not None:
@@ -440,7 +893,6 @@ class Challenge1Dataset(Dataset):
                     
                     current_trial = None
             
-            logger.info(f"Extracted {len(trials)} CCD trials from {ccd_file}")
             return trials
             
         except Exception as e:
@@ -448,82 +900,61 @@ class Challenge1Dataset(Dataset):
             return []
     
     @staticmethod
-    def _find_sus_pre_trial_epoch(sus_events: List[Tuple], contrast_change_time: float, 
-                                 pre_trial_duration: float, sampling_rate: int) -> Optional[np.ndarray]:
-        """
-        Find SuS pre-trial epoch (2 seconds before CCD contrast change)
-        
-        Args:
-            sus_events: List of (raw, events_df) tuples from SuS files
-            contrast_change_time: Time of contrast change in CCD task
-            pre_trial_duration: Duration of pre-trial epoch (2.0 seconds)
-            sampling_rate: Sampling rate
-            
-        Returns:
-            Pre-trial EEG epoch or None if not found
-        """
+    def _extract_ccd_epoch(eeg_data: np.ndarray, trial: Dict, epoch_duration: float, sampling_rate: int) -> Optional[np.ndarray]:
+        """Extract CCD EEG epoch for a specific trial"""
         try:
-            # Calculate pre-trial epoch window
-            epoch_start_time = contrast_change_time - pre_trial_duration  # 2 seconds before
-            epoch_end_time = contrast_change_time
+            # Calculate start and end samples based on contrast change time
+            start_time = trial['contrast_change_time']
+            start_sample = int(start_time * sampling_rate)
+            end_sample = start_sample + int(epoch_duration * sampling_rate)
             
-            # Try to find epoch in SuS data
-            for raw, events_df in sus_events:
-                # Check if epoch time is within this SuS recording
-                recording_duration = raw.n_times / raw.info['sfreq']
-                
-                if epoch_start_time >= 0 and epoch_end_time <= recording_duration:
-                    # Convert to samples
-                    start_sample = int(epoch_start_time * sampling_rate)
-                    end_sample = int(epoch_end_time * sampling_rate)
-                    
-                    # Check if epoch is within data bounds
-                    if start_sample < 0 or end_sample >= raw.n_times:
-                        continue
-                    
-                    # Extract epoch
-                    epoch_data = raw.get_data()[:, start_sample:end_sample]
-                    
-                    # Validate epoch shape
-                    expected_samples = int(pre_trial_duration * sampling_rate)
-                    if epoch_data.shape[1] != expected_samples:
-                        logger.warning(f"Epoch data shape mismatch: {epoch_data.shape[1]} != {expected_samples}")
-                        continue
-                    
-                    # Apply z-score normalization
-                    normalized_epoch = np.zeros_like(epoch_data)
-                    for ch in range(epoch_data.shape[0]):
-                        ch_data = epoch_data[ch, :]
-                        if np.std(ch_data) > 1e-8:
-                            normalized_epoch[ch, :] = (ch_data - np.mean(ch_data)) / np.std(ch_data)
-                        else:
-                            normalized_epoch[ch, :] = ch_data
-                    
-                    return normalized_epoch
+            # Check bounds
+            if start_sample < 0 or end_sample > eeg_data.shape[1]:
+                logger.warning(f"Trial {trial['trial_id']} outside EEG data bounds")
+                return None
             
-            return None
+            # Extract epoch (data is already normalized from _load_ccd_eeg_data)
+            epoch = eeg_data[:, start_sample:end_sample]
+            
+            # Validate epoch shape
+            if epoch.shape[0] != 128:
+                logger.warning(f"Expected 128 channels, got {epoch.shape[0]} for trial {trial['trial_id']}")
+                return None
+            
+            # Return epoch directly (no need for additional normalization)
+            return epoch
             
         except Exception as e:
-            logger.error(f"Error extracting SuS pre-trial epoch: {e}")
+            logger.warning(f"Error extracting CCD epoch for trial {trial['trial_id']}: {e}")
             return None
-
+    
+    def _find_ccd_files(self, subject_dir: Path) -> List[Path]:
+        """Find CCD (Contrast Change Detection) EEG files"""
+        ccd_files = []
+        for file_path in subject_dir.glob("*task-contrastChangeDetection*_eeg.set"):
+            ccd_files.append(file_path)
+        return sorted(ccd_files)
+    
+    def _find_sus_files(self, subject_dir: Path) -> List[Path]:
+        """Find SuS (Surround Suppression) EEG files"""
+        sus_files = []
+        for file_path in subject_dir.glob("*task-surroundSupp*_eeg.set"):
+            sus_files.append(file_path)
+        return sorted(sus_files)
     
     def __len__(self) -> int:
         return len(self.samples)
     
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    def __getitem__(self, idx: int) -> Tuple[Dict[str, Any], Dict[str, torch.Tensor]]:
         """
-        Get a per-trial sample.
+        Get a sample.
         
         Args:
             idx: Index of the sample to retrieve
             
         Returns:
-            Tuple of (SuS pre-trial EEG tensor, targets dictionary)
-            
-        Raises:
-            IndexError: If idx is out of bounds
-            ValueError: If sample data is corrupted or invalid
+            Tuple of (input_features_dict, targets_dict)
+            Input features include CCD EEG data and optional SuS EEG data and demographics
         """
         if idx >= len(self.samples):
             raise IndexError(f"Sample index {idx} out of bounds for dataset with {len(self.samples)} samples")
@@ -531,58 +962,78 @@ class Challenge1Dataset(Dataset):
         try:
             sample = self.samples[idx]
             
-            # Get SuS pre-trial EEG epoch
-            sus_epoch = sample['eeg_data']  # Shape: (n_channels, n_timepoints)
+            # Get CCD EEG data (primary input X1)
+            ccd_eeg = sample['ccd_eeg_data']
             
             # Validate EEG data
-            if sus_epoch is None:
-                raise ValueError(f"EEG data is None for sample {idx}")
+            if ccd_eeg is None:
+                raise ValueError(f"CCD EEG data is None for sample {idx}")
             
-            if not isinstance(sus_epoch, np.ndarray):
-                raise ValueError(f"EEG data must be numpy array, got {type(sus_epoch)}")
+            if not isinstance(ccd_eeg, np.ndarray):
+                raise ValueError(f"CCD EEG data must be numpy array, got {type(ccd_eeg)}")
             
-            if sus_epoch.shape[0] != self.channel_count:
-                raise ValueError(f"Expected {self.channel_count} channels, got {sus_epoch.shape[0]}")
+            if ccd_eeg.shape[0] != 128:
+                raise ValueError(f"Expected 128 channels, got {ccd_eeg.shape[0]}")
             
-            # Create tensors
-            sus_eeg_tensor = torch.FloatTensor(sus_epoch)
+            # Validate EEG data for NaN/Inf before creating tensor
+            if np.isnan(ccd_eeg).any():
+                logger.error(f"NaN detected in CCD EEG data for sample {idx}")
+                raise ValueError(f"NaN in CCD EEG data for sample {idx}")
+            if np.isinf(ccd_eeg).any():
+                logger.error(f"Inf detected in CCD EEG data for sample {idx}")
+                raise ValueError(f"Inf in CCD EEG data for sample {idx}")
             
-            # Create target tensors with validation
+            # Create input features dictionary
+            input_features = {
+                'ccd_eeg': torch.FloatTensor(ccd_eeg)  # Primary input X1
+            }
+            
+            # Add SuS EEG data if available (X2)
+            if self.use_sus_eeg and sample.get('sus_eeg_data') is not None:
+                sus_eeg = sample['sus_eeg_data']
+                if isinstance(sus_eeg, np.ndarray) and sus_eeg.shape[0] == 128:
+                    input_features['sus_eeg'] = torch.FloatTensor(sus_eeg)
+            
+            # Add demographics if available (P)
+            if self.use_demographics and sample.get('demographics') is not None:
+                demo = sample['demographics']
+                demographics_tensor = torch.FloatTensor([
+                    demo.get('age', 0.0),
+                    demo.get('sex', 0.0),
+                    demo.get('handedness', 0.0),
+                    demo.get('p_factor', 0.0),
+                    demo.get('attention', 0.0),
+                    demo.get('internalizing', 0.0),
+                    demo.get('externalizing', 0.0)
+                ])
+                input_features['demographics'] = demographics_tensor
+            
+            # Apply transforms to all EEG data if provided
+            if self.transforms:
+                if 'ccd_eeg' in input_features:
+                    input_features['ccd_eeg'] = self.transforms(input_features['ccd_eeg'])
+                if 'sus_eeg' in input_features:
+                    input_features['sus_eeg'] = self.transforms(input_features['sus_eeg'])
+            
+            # Create target tensors
             targets = {}
             
             # Response time (regression)
             rt = sample['targets']['response_time']
             if rt is None or np.isnan(rt) or rt < 0:
-                logger.error(f"Invalid response time {rt} for sample {idx}, using default")
                 rt = 0  # Default response time
+            
+            # Use raw response time values (no log transform)
+            # This matches the model's output scaling
             targets['response_time'] = torch.FloatTensor([rt])
             
             # Hit/miss (classification)
             hm = sample['targets']['hit_miss']
             if hm not in [0, 1]:
-                logger.error(f"Invalid hit/miss {hm} for sample {idx}, using default")
                 hm = 0  # Default to miss
             targets['hit_miss'] = torch.LongTensor([hm])
             
-            # Age (regression)
-            age = sample['targets']['age']
-            if age is None or np.isnan(age) or age < 0:
-                logger.error(f"Invalid age {age} for sample {idx}, using default")
-                age = 0  # Default age
-            targets['age'] = torch.FloatTensor([age])
-            
-            # Sex (classification)
-            sex = sample['targets']['sex']
-            if sex not in [0, 1]:
-                logger.error(f"Invalid sex {sex} for sample {idx}, using default")
-                sex = 0  # Default to male
-            targets['sex'] = torch.LongTensor([sex])
-            
-            # Apply transforms if provided
-            if self.transforms:
-                sus_eeg_tensor = self.transforms(sus_eeg_tensor)
-            
-            return sus_eeg_tensor, targets
+            return input_features, targets
             
         except Exception as e:
             logger.error(f"Error loading sample {idx}: {e}")
@@ -604,12 +1055,15 @@ class Challenge1Dataset(Dataset):
         config_str = str(sorted(self.config.items()))
         config_hash = hashlib.md5(config_str.encode()).hexdigest()[:8]
         
+        # Include feature flags in cache filename to avoid conflicts
+        features_str = f"d{int(self.use_demographics)}_s{int(self.use_sus_eeg)}"
+        
         # Include split in filename
         cache_config = self.config.get('caching', {})
         cache_dir = Path(cache_config.get('cache_dir', './cache'))
         cache_dir.mkdir(exist_ok=True)
         
-        cache_file = cache_dir / f"challenge1_samples_{self.split}_{config_hash}.pkl"
+        cache_file = cache_dir / f"challenge1_samples_{self.split}_{features_str}_{config_hash}.pkl"
         return cache_file
     
     def _load_from_cache(self, cache_file: Path) -> bool:
@@ -635,32 +1089,51 @@ class Challenge1Dataset(Dataset):
         except Exception as e:
             logger.warning(f"Failed to save cache to {cache_file}: {e}")
 
+# Global cache for BIDS layouts to avoid duplicate initialization
+_BIDS_LAYOUTS_CACHE = {}
+
 def create_challenge1_dataloaders(
     data_dir: str,
     config: Dict[str, Any],
     batch_size: int = 32,
-    num_workers: int = 4,
-    test_size: float = 0.2,
-    val_size: float = 0.2,
-    random_state: int = 42,
-    clear_cache: bool = False
-) -> Tuple[DataLoader, DataLoader, DataLoader]:
+    num_workers: Optional[int] = None,
+    clear_cache: bool = False,
+    use_demographics: bool = True,
+    use_sus_eeg: bool = False
+) -> Tuple[DataLoader, DataLoader]:
     """
-    Create train, validation, and test dataloaders for Challenge 1 using per-trial approach
+    Create train, validation, and test dataloaders for Challenge 1
+    
+    EEG Foundation Challenge Split Strategy:
+    - Training Set: Releases 1-11, excluding Release 5
+    - Validation Set: Release 5 only
+    - Test Set: Release 12 (held-out, not publicly released)
     
     Args:
         data_dir: Path to HBN BIDS EEG dataset
         config: Configuration dictionary
         batch_size: Batch size for training
         num_workers: Number of data loader workers
-        test_size: Test set size (fraction)
-        val_size: Validation set size (fraction)
-        random_state: Random state for reproducibility
         clear_cache: Whether to clear existing cache and reprocess data
+        use_demographics: Whether to include demographics and psychopathology as additional features
+        use_sus_eeg: Whether to include SuS EEG data as additional features
         
     Returns:
-        Tuple of (train_loader, val_loader, test_loader)
+        Tuple of (train_loader, val_loader)
     """
+    global _BIDS_LAYOUTS_CACHE
+    
+    # Get num_workers from config if not provided
+    if num_workers is None:
+        num_workers = config.get('hardware', {}).get('num_workers', 4)
+        logger.info(f"Using num_workers from config: {num_workers}")
+    
+    # Validate that required releases are available
+    data_path = Path(data_dir)
+    available_releases = [d.name for d in data_path.iterdir() 
+                         if d.is_dir() and d.name.startswith('cmi_bids')]
+    logger.info(f"Available releases: {available_releases}")
+    
     # Clear cache if requested
     if clear_cache:
         cache_config = config.get('caching', {})
@@ -669,65 +1142,63 @@ def create_challenge1_dataloaders(
             import shutil
             shutil.rmtree(cache_dir)
             logger.info(f"Cache cleared from {cache_dir}")
+        # Also clear BIDS layouts cache
+        _BIDS_LAYOUTS_CACHE.clear()
     
-    # Create full dataset to get all subjects
-    full_dataset = Challenge1Dataset(
-        data_dir=data_dir,
-        config=config,
-        split='train'  # Use train split to get all data
-    )
+    # EEG Foundation Challenge Release-based Split Strategy
+    logger.info("Creating EEG Foundation Challenge release-based splits...")
     
-    # Get unique subjects
-    subjects = list(set(s['subject_id'] for s in full_dataset.samples))
+    # Define release assignments according to challenge specification
+    # Note: Only using available releases (R1-R9), excluding R10, R11, and NC
+    train_releases = ['cmi_bids_R1', 'cmi_bids_R2', 'cmi_bids_R3', 'cmi_bids_R4',
+                     'cmi_bids_R6', 'cmi_bids_R7', 'cmi_bids_R8', 'cmi_bids_R9']
+    val_releases = ['cmi_bids_R5']
     
-    # Split subjects (not samples) for proper cross-validation
-    train_subjects, test_subjects = train_test_split(
-        subjects, test_size=test_size, random_state=random_state
-    )
+    logger.info(f"Training releases: {train_releases}")
+    logger.info(f"Validation releases: {val_releases}")
     
-    # Split train subjects into train and val subjects
-    # val_size is the fraction of train subjects that will be used for validation
-    train_subjects, val_subjects = train_test_split(
-        train_subjects, test_size=val_size/(1-test_size), random_state=random_state
-    )
+    # Use cached BIDS layouts or initialize if not cached
+    if not _BIDS_LAYOUTS_CACHE:
+        logger.info("Initializing shared BIDS layouts...")
+        total_subjects = 0
+        
+        for release_dir in [str(data_path / release) for release in available_releases]:
+            try:
+                layout = BIDSLayout(release_dir)
+                subjects = layout.get_subjects()
+                _BIDS_LAYOUTS_CACHE[release_dir] = layout
+                total_subjects += len(subjects)
+                logger.info(f"✅ {Path(release_dir).name}: {len(subjects)} subjects")
+            except Exception as e:
+                logger.warning(f"Failed to initialize layout for {release_dir}: {e}")
+        
+        logger.info(f"Shared BIDS layouts initialized: {len(_BIDS_LAYOUTS_CACHE)} releases, {total_subjects} total subjects")
+    else:
+        logger.info(f"Using cached BIDS layouts: {len(_BIDS_LAYOUTS_CACHE)} releases")
     
-    subject_split = {
-        'train': train_subjects,
-        'val': val_subjects,
-        'test': test_subjects
-    }
-    
-    # Filter samples for each split using the already processed data
-    train_samples = [s for s in full_dataset.samples if s['subject_id'] in train_subjects]
-    val_samples = [s for s in full_dataset.samples if s['subject_id'] in val_subjects]
-    test_samples = [s for s in full_dataset.samples if s['subject_id'] in test_subjects]
-    
-    # Create datasets for each split using pre-processed samples
+    # Create datasets for each split with shared layouts
     train_dataset = Challenge1Dataset(
         data_dir=data_dir,
         config=config,
         split='train',
-        subject_split=subject_split,
-        samples=train_samples
+        releases=train_releases,
+        use_demographics=use_demographics,
+        use_sus_eeg=use_sus_eeg,
+        shared_layouts=_BIDS_LAYOUTS_CACHE  # Pass cached layouts
     )
     
     val_dataset = Challenge1Dataset(
         data_dir=data_dir,
         config=config,
         split='val',
-        subject_split=subject_split,
-        samples=val_samples
-    )
-    
-    test_dataset = Challenge1Dataset(
-        data_dir=data_dir,
-        config=config,
-        split='test',
-        subject_split=subject_split,
-        samples=test_samples
+        releases=val_releases,
+        use_demographics=use_demographics,
+        use_sus_eeg=use_sus_eeg,
+        shared_layouts=_BIDS_LAYOUTS_CACHE  # Pass cached layouts
     )
     
     # Create data loaders
+    logger.info(f"Creating DataLoaders with num_workers={num_workers}")
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
@@ -746,21 +1217,11 @@ def create_challenge1_dataloaders(
         persistent_workers=True if num_workers > 0 else False
     )
     
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=True,
-        persistent_workers=True if num_workers > 0 else False
-    )
+    logger.info(f"Created Challenge 1 data loaders (EEG Foundation Challenge splits):")
+    logger.info(f"  Train: {len(train_dataset)} samples")
+    logger.info(f"  Validation: {len(val_dataset)} samples")
     
-    logger.info(f"Created Challenge 1 data loaders:")
-    logger.info(f"  Train: {len(train_dataset)} samples, {len(train_subjects)} subjects")
-    logger.info(f"  Val: {len(val_dataset)} samples, {len(val_subjects)} subjects")
-    logger.info(f"  Test: {len(test_dataset)} samples, {len(test_subjects)} subjects")
-    
-    return train_loader, val_loader, test_loader
+    return train_loader, val_loader
 
 # Keep the original EEGFoundationDataset for Challenge 2
 class EEGFoundationDataset(Dataset):
@@ -932,7 +1393,7 @@ if __name__ == '__main__':
     
     if len(dataset) > 0:
         sample_eeg, sample_targets = dataset[0]
-        print(f"SuS EEG shape: {sample_eeg.shape}")
+        print(f"SuS EEG shape: {sample_eeg['ccd_eeg'].shape}")
         print(f"Targets: {list(sample_targets.keys())}")
         print("Challenge 1 dataset test completed successfully!")
     else:
