@@ -606,10 +606,16 @@ def main():
         choices=['cnn', 'transformer'],
         help='Encoder type (overrides config)'
     )
+    # parser.add_argument(
+    #     '--data-dir',
+    #     type=str,
+    #     default='./data/raw/HBN_BIDS_EEG',
+    #     help='Path to HBN_BIDS_EEG dataset'
+    # )
     parser.add_argument(
         '--data-dir',
         type=str,
-        default='./data/raw/HBN_BIDS_EEG',
+        default='src/data/raw/HBN_BIDS_EEG',
         help='Path to HBN_BIDS_EEG dataset'
     )
     parser.add_argument(
