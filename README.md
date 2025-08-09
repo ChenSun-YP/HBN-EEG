@@ -1,7 +1,7 @@
 # EEG Foundation Challenge 2025 - Challenge 1: Cross-Task Transfer Learning
 
 ## Challenge Overview
-
+1
 This repository implements **Challenge 1: Cross-Task Transfer Learning** from the [EEG Foundation Challenge 2025](https://arxiv.org/pdf/2506.19141). The challenge focuses on predicting behavioral outcomes from EEG data using a cross-task transfer learning approach.
 
 ### Official Challenge Constraints
