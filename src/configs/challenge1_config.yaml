@@ -76,13 +76,20 @@ data:
     interpolate_bad_channels: true
     max_interpolated: 5
 
+# # Quick test mode for development
+# quick_test:
+#   enabled: true
+#   max_subjects: 3
+#   bids_dirs:
+#   - cmi_bids_R1
+#   - cmi_bids_R2
+
 # Quick test mode for development
 quick_test:
   enabled: true
   max_subjects: 3
   bids_dirs:
-  - cmi_bids_R1
-  - cmi_bids_R2
+  - cmi_bids_R1_mini
 
 # Training configuration
 training:
@@ -117,7 +124,7 @@ validation:
 
 # Hardware configuration
 hardware:
-  num_workers: 4
+  num_workers: 0
   pin_memory: true
   persistent_workers: true
   precision: 16-mixed
@@ -164,7 +171,7 @@ benchmark: false
 
 # Architecture comparison settings (for research)
 comparison:
-  run_both_architectures: false
+  run_both_architectures: true
   cnn_config:
     learning_rate: 1e-4
     batch_size: 32

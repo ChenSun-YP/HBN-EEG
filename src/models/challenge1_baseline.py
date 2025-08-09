@@ -431,7 +431,7 @@ class Challenge1Model(pl.LightningModule):
             Dictionary with predictions from both heads.
         """
         # 1. Handle Input
-        if isinstance(input_features, dict):
+        if isinstance(input_features, dict): # batch,channels,feature dim
             ccd_eeg = input_features['ccd_eeg']
             demographics = input_features.get('demographics', None)
         else: # Handle old single-tensor format

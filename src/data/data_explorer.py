@@ -206,7 +206,7 @@ class HBNDatasetExplorer:
 def main():
     """Main exploration function."""
     # Path to HBN dataset
-    dataset_path = "data/raw/HBN_BIDS_EEG"
+    dataset_path = "src/data/raw/HBN_BIDS_EEG"
     
     if not Path(dataset_path).exists():
         print(f"Dataset path {dataset_path} not found!")

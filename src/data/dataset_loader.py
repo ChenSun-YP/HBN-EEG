@@ -1150,9 +1150,12 @@ def create_challenge1_dataloaders(
     
     # Define release assignments according to challenge specification
     # Note: Only using available releases (R1-R9), excluding R10, R11, and NC
-    train_releases = ['cmi_bids_R1', 'cmi_bids_R2', 'cmi_bids_R3', 'cmi_bids_R4',
-                     'cmi_bids_R6', 'cmi_bids_R7', 'cmi_bids_R8', 'cmi_bids_R9']
-    val_releases = ['cmi_bids_R5']
+    # train_releases = ['cmi_bids_R1', 'cmi_bids_R2', 'cmi_bids_R3', 'cmi_bids_R4',
+    #                  'cmi_bids_R6', 'cmi_bids_R7', 'cmi_bids_R8', 'cmi_bids_R9']
+    # val_releases = ['cmi_bids_R5']
+    train_releases = ['cmi_bids_R1_mini']
+    val_releases = ['cmi_bids_R1_mini']
+    
     
     logger.info(f"Training releases: {train_releases}")
     logger.info(f"Validation releases: {val_releases}")
@@ -1384,7 +1387,7 @@ if __name__ == '__main__':
     
     print("Testing Challenge 1 Dataset (Per-Trial)...")
     dataset = Challenge1Dataset(
-        data_dir='./data/raw/HBN_BIDS_EEG',
+        data_dir='src/data/raw/HBN_BIDS_EEG',
         config=config,
         split='train'
     )
