@@ -3,7 +3,7 @@
 
 # Challenge 1 specific settings
 challenge1:
-  use_sus_eeg: false         # Disable SuS EEG data (X2) by default
+  use_sus_eeg: true         # Disable SuS EEG data (X2) by default
   use_demographics: false    # Disable demographics/psychopathology (P) by default
   description: Training with CCD EEG data (X1) to predict CCD behavioral outcomes
   targets:
