@@ -264,7 +264,7 @@ class Challenge1Dataset(Dataset):
         qc_dataframes = []
 
         # Check if quick test mode is enabled
-        quick_test = self.config.get("quick_test", {})
+        bids_dirs = self.config.get("quick_test", {})
         quick_test_enabled = quick_test.get("enabled", False)
         allowed_bids_dirs = (
             quick_test.get("bids_dirs", None) if quick_test_enabled else None
@@ -1383,8 +1383,8 @@ def create_challenge1_dataloaders(
     # val_releases = ['cmi_bids_R5']
     # train_releases = ["cmi_bids_R1_mini"]
     # val_releases = ["cmi_bids_R1_mini"]
-    train_releases = available_releases
-    val_releases = available_releases
+    train_releases = [x for x in available_releases if x != "cmi_bids_R5_mini"]
+    val_releases = ["cmi_bids_R5_mini"]
 
     logger.info(f"Training releases: {train_releases}")
     logger.info(f"Validation releases: {val_releases}")

@@ -89,7 +89,7 @@ quick_test:
   enabled: true
   max_subjects: 3
   bids_dirs:
-  - cmi_bids_R1_mini
+  - cmi_bids_R1
 
 # Training configuration
 training:
