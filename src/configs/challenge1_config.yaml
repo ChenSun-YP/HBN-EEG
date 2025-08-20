@@ -171,7 +171,7 @@ benchmark: false
 
 # Architecture comparison settings (for research)
 comparison:
-  run_both_architectures: true
+  run_both_architectures: false # true
   cnn_config:
     learning_rate: 1e-4
     batch_size: 32

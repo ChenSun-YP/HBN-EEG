@@ -777,17 +777,6 @@ class Challenge1Dataset(Dataset):
                     sus_files, filter_params, resample_freq
                 )
 
-            """ this code takes 2 second snippets of the ccd eeg data
-            I want to use each SuS segment instead of a 2 second snippet (~60 segments per recording), but they need to be padded to the maximum length
-            need to code 2 new methods:
-                - extract segments & record which is longest
-                - pad all to longest
-            return them here to each become a sample
-            
-            sample must also include a 2 second snippet of CCD data to be trained on
-            
-            """
-
             for ccd_file in ccd_files:
 
                 try:
@@ -1392,8 +1381,10 @@ def create_challenge1_dataloaders(
     # train_releases = ['cmi_bids_R1', 'cmi_bids_R2', 'cmi_bids_R3', 'cmi_bids_R4',
     #                  'cmi_bids_R6', 'cmi_bids_R7', 'cmi_bids_R8', 'cmi_bids_R9']
     # val_releases = ['cmi_bids_R5']
-    train_releases = ["cmi_bids_R1_mini"]
-    val_releases = ["cmi_bids_R1_mini"]
+    # train_releases = ["cmi_bids_R1_mini"]
+    # val_releases = ["cmi_bids_R1_mini"]
+    train_releases = available_releases
+    val_releases = available_releases
 
     logger.info(f"Training releases: {train_releases}")
     logger.info(f"Validation releases: {val_releases}")
@@ -1465,198 +1456,6 @@ def create_challenge1_dataloaders(
     logger.info(f"  Validation: {len(val_dataset)} samples")
 
     return train_loader, val_loader
-
-
-'''region
-# modified code
-
-class ModifiedChallenge1Dataset (Dataset):
-    
-    def __init__(self, data_dir: str, config: Dict[str, Any], split: str = 'train', 
-                 subject_split: Optional[Dict[str, List[str]]] = None, transforms=None, 
-                 samples: Optional[List] = None, releases: Optional[List[str]] = None,
-                 use_demographics: bool = True, use_sus_eeg: bool = False,
-                 shared_layouts: Optional[Dict[str, Any]] = None):
-        """
-        Initialize Challenge 1 dataset
-        
-        Args:
-            data_dir: Path to HBN BIDS EEG dataset
-            config: Configuration dictionary
-            split: Dataset split ('train', 'val', 'test')
-            subject_split: Optional pre-defined subject splits
-            transforms: Optional transforms to apply
-            samples: Pre-processed samples (for reuse)
-            releases: Specific releases for this split
-            use_demographics: Whether to include demographics and psychopathology as additional features
-            use_sus_eeg: Whether to include SuS EEG data as additional features
-        """
-        self.data_dir = Path(data_dir)
-        self.config = config
-        self.split = split
-        self.subject_split = subject_split
-        self.transforms = transforms
-        self.releases = releases  # Specific releases for this split
-        self.use_demographics = use_demographics
-        self.use_sus_eeg = use_sus_eeg
-        self.shared_layouts = shared_layouts
-        
-        # Get dataset configuration
-        self.channel_count = config['data']['channel_count']  # Should be 128
-        self.sampling_rate = config['data']['sampling_rate']
-        self.epoch_duration = 2.0  # 2 seconds per CCD epoch as specified
-        
-        # Validate channel count
-        if self.channel_count != 128:
-            logger.warning(f"Channel count should be 128 for EEG Foundation Challenge, got {self.channel_count}")
-        
-        # If samples are provided, use them directly (for reuse)
-        if samples is not None:
-            self.samples = samples
-            logger.info(f"Reusing {len(self.samples)} pre-processed samples for {split} split")
-            return
-        
-        # Try to load from cache first (if enabled)
-        cache_config = config.get('caching', {})
-        cache_enabled = cache_config.get('enabled', True)
-        
-        if cache_enabled:
-            cache_file = self._get_cache_file_path()
-            if self._load_from_cache(cache_file):
-                logger.info(f"Loaded {len(self.samples)} samples from cache for {split} split")
-                return
-        
-        # Parallel processing configuration
-        self.use_parallel = config.get('parallel', {}).get('enabled', True)
-        self.max_workers = config.get('parallel', {}).get('max_workers', multiprocessing.cpu_count())
-        self.batch_size = config.get('parallel', {}).get('batch_size', 100)  # Process subjects in batches
-        
-        logger.info(f"Parallel processing: {'enabled' if self.use_parallel else 'disabled'}")
-        if self.use_parallel:
-            logger.info(f"Using {self.max_workers} workers with batch size {self.batch_size}")
-        
-        # Setup preprocessing
-        self._setup_preprocessing()
-        
-        # Initialize BIDS layout for file discovery (use shared layouts if provided)
-        if self.shared_layouts is not None:
-            logger.info(f"Using shared BIDS layouts for {split} split")
-            self.layouts = self.shared_layouts
-            # Keep a reference to the first layout for backward compatibility
-            if self.layouts:
-                self.layout = list(self.layouts.values())[0]
-            else:
-                self.layout = None
-        else:
-            self._setup_bids_layout()
-        
-        # Load metadata and create quality control whitelist
-        self.metadata, self.qc_whitelist = self._load_metadata_and_qc()
-        
-        # Create samples
-        self.samples = []
-        self._create_samples()
-        
-        # Save to cache (if enabled)
-        if cache_enabled:
-            self._save_to_cache(cache_file)
-        
-        logger.info(f"Created {len(self.samples)} samples for {split} split")
-    
-    def _setup_preprocessing(self):
-        """Setup preprocessing parameters"""
-        preprocess_config = self.config.get('preprocessing', {})
-        
-        self.filter_params = {
-            'l_freq': preprocess_config.get('filter_low', 0.5),
-            'h_freq': preprocess_config.get('filter_high', 70.0)
-        }
-        
-        self.resample_freq = preprocess_config.get('resample_freq', 256)
-
-    @staticmethod
-    def _load_sus_eeg_data(sus_files: List[str], filter_params: Dict, resample_freq: int) -> Optional[np.ndarray]:
-        """Load SuS EEG data from .set files"""
-        try:
-            stim_on_sus_data = []
-            
-            for sus_file in sus_files:
-                # Load EEG data using MNE directly
-                raw = mne.io.read_raw_eeglab(sus_file, preload=True, verbose=False)
-                
-                # Apply preprocessing
-                if filter_params:
-                    raw.filter(l_freq=filter_params['l_freq'], h_freq=filter_params['h_freq'], verbose=False)
-                
-                if resample_freq:
-                    raw.resample(resample_freq, verbose=False)
-                
-                # Ensure 128 channels (EEG Foundation Challenge requirement)
-                if raw.info['nchan'] != 128:
-                    # More efficient channel selection - only log once per subject
-                    if raw.info['nchan'] > 128:
-                        # Take first 128 channels (most common case)
-                        raw.pick(raw.ch_names[:128])
-                    elif raw.info['nchan'] < 128:
-                        logger.warning(f"Not enough EEG channels ({raw.info['nchan']}), skipping")
-                        continue
-                    else:
-                        # Exactly 128 channels, no action needed
-                        pass
-                
-                # Get data and apply z-score normalization
-                data = raw.get_data()
-                
-                # Check for NaN or Inf in raw data
-                if np.isnan(data).any():
-                    logger.warning(f"NaN detected in raw SuS EEG data from {sus_file}")
-                    continue
-                if np.isinf(data).any():
-                    logger.warning(f"Inf detected in raw SuS EEG data from {sus_file}")
-                    continue
-                
-                normalized_data = np.zeros_like(data)
-                for ch in range(data.shape[0]):
-                    ch_data = data[ch, :]
-                    if np.std(ch_data) > 1e-8:
-                        normalized_data[ch, :] = (ch_data - np.mean(ch_data)) / np.std(ch_data)
-                    else:
-                        normalized_data[ch, :] = ch_data
-                
-                # Check for NaN or Inf in normalized data
-                if np.isnan(normalized_data).any():
-                    logger.warning(f"NaN detected in normalized SuS EEG data from {sus_file}")
-                    continue
-                if np.isinf(normalized_data).any():
-                    logger.warning(f"Inf detected in normalized SuS EEG data from {sus_file}")
-                    continue
-                
-                
-                # extract only the stim_on sections
-                for annot in raw.annotations:
-                    onset_sample = int(annot['onset'] * raw.info['sfreq'])
-                    duration_samples = int(annot['duration'] * raw.info['sfreq'])
-                segment = normalized_data[:, onset_sample:onset_sample + duration_samples]
-
-                if annot['description'].lower() == "stim_on":
-                    stim_on_segments.append(segment)
-                elif annot['description'].lower() == "fixpoint_on":
-                    fixpoint_on_segments.append(segment)
-                
-                
-                stim_on_sus_data.append(normalized_data)
-            
-            # Concatenate all SuS data - join all SuS data from multiple sessions into a single array
-            if stim_on_sus_data:
-                return np.concatenate(stim_on_sus_data, axis=1)  # Concatenate along time dimension
-            else:
-                return None
-                
-        except Exception as e:
-            logger.warning(f"Error loading SuS EEG data: {e}")
-            return None
-    
-'''
 
 
 # Keep the original EEGFoundationDataset for Challenge 2
