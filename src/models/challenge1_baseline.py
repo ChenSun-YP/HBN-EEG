@@ -413,7 +413,7 @@ class Challenge1Model(pl.LightningModule):
         self.ce_loss = nn.CrossEntropyLoss()
         
         # Task-specific scaling factors for response time
-        self.response_time_scale = config.get('training', {}).get('response_time_scale', 1000.0)
+        self.response_time_scale = config.get('training', {}).get('response_time_scale', 1.0)
         
         # Store encoder type for logging
         self.encoder_type = encoder_type
@@ -448,7 +448,7 @@ class Challenge1Model(pl.LightningModule):
         # The shared encoder processes ONLY the primary CCD EEG data.
         # Output shape: (batch_size, sequence_length, hidden_dim) for Transformer
         # or (batch_size, hidden_dim) for CNN.
-        shared_features = self.shared_encoder(ccd_eeg)
+        shared_features = self.shared_encoder(ccd_eeg)  # NOTE: we can add the z here? z should work as a masking to input ccd_eeg 
         
         # Validate shared features
         if torch.isnan(shared_features).any():
@@ -474,7 +474,7 @@ class Challenge1Model(pl.LightningModule):
 
         # 4. Prediction Heads
         # The heads now operate on the final, fixed-size feature vector.
-        response_time_pred = self.response_time_head(final_features)
+        response_time_pred = self.response_time_head(final_features) # this in seconds
         
         # Validate response time prediction before scaling
         if torch.isnan(response_time_pred).any():
@@ -483,10 +483,11 @@ class Challenge1Model(pl.LightningModule):
             raise ValueError("Inf detected in response time head output!")
         
         # Ensure positive values and reasonable range (0-2000ms)
-        response_time_pred = torch.clamp(response_time_pred.squeeze(-1), 0.1, 2000.0)
+        response_time_pred = torch.clamp(response_time_pred.squeeze(-1), 1e-8, 2.0) # in seconds
         
         # Apply scaling if needed
         if self.response_time_scale != 1.0:
+            logger.info(f"Applying response time scale: {self.response_time_scale}")
             response_time_pred = response_time_pred * self.response_time_scale
         
         hit_miss_pred = self.hit_miss_head(final_features)
@@ -576,8 +577,8 @@ class Challenge1Model(pl.LightningModule):
         losses['response_time'] = F.huber_loss(rt_pred, rt_target, delta=1.0)
         
         # Hit/miss loss (classification)
-        hm_pred = predictions['hit_miss']
-        hm_target = targets['hit_miss'].squeeze()
+        hm_pred = predictions['hit_miss']  #FIX:  why is this in the ms and the  other is in the seconds????????
+        hm_target = targets['hit_miss'].squeeze() 
         losses['hit_miss'] = self.ce_loss(hm_pred, hm_target)
         
         # Validate individual losses
