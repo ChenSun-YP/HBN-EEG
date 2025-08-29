@@ -85,7 +85,7 @@ class Challenge1Dataset(Dataset):
         samples: Optional[List] = None,
         releases: Optional[List[str]] = None,
         use_demographics: bool = True,
-        use_sus_eeg: bool = False,
+        use_sus_eeg: bool = True,
         shared_layouts: Optional[Dict[str, Any]] = None,
     ):
         """
@@ -264,7 +264,7 @@ class Challenge1Dataset(Dataset):
         qc_dataframes = []
 
         # Check if quick test mode is enabled
-        bids_dirs = self.config.get("quick_test", {})
+        quick_test = self.config.get("quick_test", {})
         quick_test_enabled = quick_test.get("enabled", False)
         allowed_bids_dirs = (
             quick_test.get("bids_dirs", None) if quick_test_enabled else None
@@ -410,6 +410,7 @@ class Challenge1Dataset(Dataset):
 
                 # Get SuS files if using as additional features (X2)
                 if self.use_sus_eeg:
+                    print("attempting to locate sus_files")
                     release_sus_files = layout.get(
                         task="surroundSupp",
                         suffix="eeg",
@@ -419,7 +420,7 @@ class Challenge1Dataset(Dataset):
                     sus_files.extend(release_sus_files)
 
                 logger.info(
-                    f"✅ {release_name}: {len(release_ccd_files)} CCD files, {len(release_sus_files) if self.use_sus_eeg else 0} SuS files"
+                    f" {release_name}: {len(release_ccd_files)} CCD files, {len(release_sus_files) if self.use_sus_eeg else 0} SuS files"
                 )
 
             except Exception as e:
@@ -777,6 +778,9 @@ class Challenge1Dataset(Dataset):
                     sus_files, filter_params, resample_freq
                 )
 
+            print(f"subject sus_files bool: {sus_files}")
+            print(f"subject sus_eeg_data bool: {sus_eeg_data}")
+
             for ccd_file in ccd_files:
 
                 try:
@@ -792,17 +796,19 @@ class Challenge1Dataset(Dataset):
                     # extract array of padded segments
                     # sus_segments = Challenge1Dataset._load_sus_eeg_data(sus_files, filter_params, resample_freq)
 
-                    # Create samples for each CCD trial
+                    # Create samples for each sus trial
                     for trial in ccd_trials:
                         # Extract CCD EEG epoch for this trial
                         ccd_epoch = Challenge1Dataset._extract_ccd_epoch(
                             ccd_eeg_data, trial, epoch_duration, resample_freq
                         )
 
+                        # hijacked to take in sus data instead as primary
+
                         if ccd_epoch is not None:
                             # Create sample with CCD EEG as primary input
                             sample = {
-                                "ccd_eeg_data": ccd_epoch,  # Primary input X1
+                                "sus_eeg_data": sus_eeg_data,  # Primary input X1
                                 "demographics": (
                                     {
                                         "age": age,
@@ -921,11 +927,19 @@ class Challenge1Dataset(Dataset):
     ) -> Optional[np.ndarray]:
         """Load SuS EEG data from .set files"""
         try:
-            stim_on_sus_data = []
+            # Collect data from all files
+            all_stim_on_data = []
+            all_fixpoint_on_data = []
 
             for sus_file in sus_files:
+                print(f"Debug: Processing SuS file: {sus_file}")
+
                 # Load EEG data using MNE directly
                 raw = mne.io.read_raw_eeglab(sus_file, preload=True, verbose=False)
+
+                print(
+                    f"Debug: Loaded raw data with {raw.info['nchan']} channels, {len(raw.annotations)} annotations"
+                )
 
                 # Apply preprocessing
                 if filter_params:
@@ -940,18 +954,15 @@ class Challenge1Dataset(Dataset):
 
                 # Ensure 128 channels (EEG Foundation Challenge requirement)
                 if raw.info["nchan"] != 128:
-                    # More efficient channel selection - only log once per subject
                     if raw.info["nchan"] > 128:
                         # Take first 128 channels (most common case)
                         raw.pick(raw.ch_names[:128])
                     elif raw.info["nchan"] < 128:
                         logger.warning(
-                            f"Not enough EEG channels ({raw.info['nchan']}), skipping"
+                            f"Not enough EEG channels ({raw.info['nchan']}), skipping file {sus_file}"
                         )
                         continue
-                    else:
-                        # Exactly 128 channels, no action needed
-                        pass
+                    # Note: removed unnecessary else clause
 
                 # Get data and apply z-score normalization
                 data = raw.get_data()
@@ -964,6 +975,7 @@ class Challenge1Dataset(Dataset):
                     logger.warning(f"Inf detected in raw SuS EEG data from {sus_file}")
                     continue
 
+                # Normalize data
                 normalized_data = np.zeros_like(data)
                 for ch in range(data.shape[0]):
                     ch_data = data[ch, :]
@@ -986,37 +998,105 @@ class Challenge1Dataset(Dataset):
                     )
                     continue
 
-                # locate all the "stim_on" sections
-                for annot in raw.annotations:
-                    if annot["description"].lower() == "stim_on":
-                        onset_sample = int(
-                            annot["onset"] * raw.info["sfreq"]
-                        )  # when the annotation begins using in the sampling index
-                    # print("onset_sample" + str(onset_sample))
-                    duration_samples = int(
-                        annot["duration"] * raw.info["sfreq"]
-                    )  # how long annotation goes in sampling index
+                # Process annotations for this file
+                stim_on_segments = []
+                fixpoint_segments = []
 
-                segment = raw.get_data(
-                    start=onset_sample, stop=onset_sample + duration_samples
+                # Debug: Print all annotations
+                print(f"Debug: Annotations in {sus_file}:")
+                for i, annot in enumerate(raw.annotations):
+                    print(
+                        f"  {i}: '{annot['description']}' at {annot['onset']}s, duration {annot['duration']}s"
+                    )
+
+                # Find all relevant annotations
+                surroundsupp_end = 0
+
+                for annot in raw.annotations:
+                    onset_sample = int(annot["onset"] * raw.info["sfreq"])
+                    duration_samples = int(annot["duration"] * raw.info["sfreq"])
+
+                    # Track end of surroundsupp events
+                    if annot["description"].lower().startswith("surroundsupp"):
+                        surroundsupp_end = onset_sample + duration_samples
+                        print(
+                            f"Debug: Found surroundsupp ending at sample {surroundsupp_end}"
+                        )
+
+                    # Process stim_on events
+                    elif annot["description"].lower() == "stim_on":
+                        print(
+                            f"Debug: Found stim_on at sample {onset_sample}, duration {duration_samples}"
+                        )
+
+                        # Extract stim_on segment
+                        stim_segment = normalized_data[
+                            :, onset_sample : onset_sample + duration_samples
+                        ]
+                        stim_on_segments.append(stim_segment)
+
+                        # Extract fixpoint segment (from previous event end to current stim_on)
+                        if surroundsupp_end < onset_sample:
+                            fixpoint_segment = normalized_data[
+                                :, surroundsupp_end:onset_sample
+                            ]
+                            if fixpoint_segment.shape[1] > 0:  # Only add if not empty
+                                fixpoint_segments.append(fixpoint_segment)
+                                print(
+                                    f"Debug: Added fixpoint segment of length {fixpoint_segment.shape[1]}"
+                                )
+
+                        # Update surroundsupp_end for next iteration
+                        surroundsupp_end = onset_sample + duration_samples
+
+                # Add segments from this file to the collection
+                if stim_on_segments:
+                    print(
+                        f"Debug: Found {len(stim_on_segments)} stim_on segments in {sus_file}"
+                    )
+                    all_stim_on_data.extend(stim_on_segments)
+
+                if fixpoint_segments:
+                    print(
+                        f"Debug: Found {len(fixpoint_segments)} fixpoint segments in {sus_file}"
+                    )
+                    all_fixpoint_on_data.extend(fixpoint_segments)
+
+            # Concatenate all data from all files
+            concat_stim_on_sus_data = None
+            concat_fixpoint_on_sus_data = None
+
+            if all_stim_on_data:
+                concat_stim_on_sus_data = np.concatenate(all_stim_on_data, axis=1)
+                print(
+                    f"Debug: Final stim_on data shape: {concat_stim_on_sus_data.shape}"
                 )
 
-                # print(segment.shape)
-                stim_on_sus_data.append(segment)
+            if all_fixpoint_on_data:
+                concat_fixpoint_on_sus_data = np.concatenate(
+                    all_fixpoint_on_data, axis=1
+                )
+                print(
+                    f"Debug: Final fixpoint data shape: {concat_fixpoint_on_sus_data.shape}"
+                )
 
-            # Concatenate all SuS data
-            if stim_on_sus_data:
-                return np.concatenate(
-                    stim_on_sus_data, axis=1
-                )  # Concatenate along time dimension
+            # Return the concatenated data
+            if (
+                concat_stim_on_sus_data is not None
+                and concat_fixpoint_on_sus_data is not None
+            ):
+                print("Debug: Returning both stim_on and fixpoint data")
+                return (concat_stim_on_sus_data, concat_fixpoint_on_sus_data)
             else:
+                print("Debug: No valid data found, returning None")
                 return None
 
         except Exception as e:
             logger.warning(f"Error loading SuS EEG data: {e}")
-            return None
+            import traceback
 
-    """changed & name changed to sus"""
+            print(f"Debug: Full traceback: {traceback.format_exc()}")
+            return None
 
     @staticmethod
     def _load_ccd_trials(ccd_file: str) -> List[Dict[str, Any]]:
@@ -1165,37 +1245,38 @@ class Challenge1Dataset(Dataset):
         try:
             sample = self.samples[idx]
 
-            # Get CCD EEG data (primary input X1)
-            ccd_eeg = sample["ccd_eeg_data"]
+            # Get SUS EEG data (primary input X1)
+            sus_eeg = sample["sus_eeg_data"]
 
             # Validate EEG data
-            if ccd_eeg is None:
-                raise ValueError(f"CCD EEG data is None for sample {idx}")
+            if sus_eeg is None:
+                raise ValueError(f"SUS EEG data is None for sample {idx}")
 
-            if not isinstance(ccd_eeg, np.ndarray):
-                raise ValueError(
-                    f"CCD EEG data must be numpy array, got {type(ccd_eeg)}"
-                )
+            # if not isinstance(sus_eeg, np.ndarray):
+            #     raise ValueError(
+            #         f"SUS EEG data must be numpy array, got {type(sus_eeg)}"
+            #     )
 
-            if ccd_eeg.shape[0] != 128:
-                raise ValueError(f"Expected 128 channels, got {ccd_eeg.shape[0]}")
+            # if sus_eeg.shape[0] != 128:
+            #     raise ValueError(f"Expected 128 channels, got {sus_eeg.shape[0]}")
 
             # Validate EEG data for NaN/Inf before creating tensor
-            if np.isnan(ccd_eeg).any():
-                logger.error(f"NaN detected in CCD EEG data for sample {idx}")
-                raise ValueError(f"NaN in CCD EEG data for sample {idx}")
-            if np.isinf(ccd_eeg).any():
-                logger.error(f"Inf detected in CCD EEG data for sample {idx}")
-                raise ValueError(f"Inf in CCD EEG data for sample {idx}")
+            # if np.isnan(sus_eeg).any():
+            #     logger.error(f"NaN detected in CCD EEG data for sample {idx}")
+            #     raise ValueError(f"NaN in CCD EEG data for sample {idx}")
+            # if np.isinf(sus_eeg).any():
+            #     logger.error(f"Inf detected in CCD EEG data for sample {idx}")
+            #     raise ValueError(f"Inf in CCD EEG data for sample {idx}")
 
             # Create input features dictionary
-            input_features = {"ccd_eeg": torch.FloatTensor(ccd_eeg)}  # Primary input X1
+            # input_features = {"sus_eeg": torch.FloatTensor(sus_eeg)}  # Primary input X1
+            input_features = {"sus_eeg": sus_eeg}
 
-            # Add SuS EEG data if available (X2)
-            if self.use_sus_eeg and sample.get("sus_eeg_data") is not None:
-                sus_eeg = sample["sus_eeg_data"]
-                if isinstance(sus_eeg, np.ndarray) and sus_eeg.shape[0] == 128:
-                    input_features["sus_eeg"] = torch.FloatTensor(sus_eeg)
+            # Add CCD EEG data if available (X2)
+            if sample.get("ccd_eeg_data") is not None:
+                ccd_eeg = sample["ccd_eeg_data"]
+                if isinstance(ccd_eeg, np.ndarray) and ccd_eeg.shape[0] == 128:
+                    input_features["ccd_eeg"] = torch.FloatTensor(ccd_eeg)
 
             # Add demographics if available (P)
             if self.use_demographics and sample.get("demographics") is not None:
@@ -1215,13 +1296,13 @@ class Challenge1Dataset(Dataset):
 
             # Apply transforms to all EEG data if provided
             if self.transforms:
-                if "ccd_eeg" in input_features:
-                    input_features["ccd_eeg"] = self.transforms(
-                        input_features["ccd_eeg"]
-                    )
                 if "sus_eeg" in input_features:
                     input_features["sus_eeg"] = self.transforms(
                         input_features["sus_eeg"]
+                    )
+                if "ccd_eeg" in input_features:
+                    input_features["ccd_eeg"] = self.transforms(
+                        input_features["ccd_eeg"]
                     )
 
             # Create target tensors
@@ -1625,14 +1706,14 @@ if __name__ == "__main__":
 
     print("Testing Challenge 1 Dataset (Per-Trial)...")
     dataset = Challenge1Dataset(
-        data_dir="src/data/raw/HBN_BIDS_EEG", config=config, split="train"
+        data_dir="modified_R1sample", config=config, split="train"
     )
 
     print(f"Dataset length: {len(dataset)}")
 
     if len(dataset) > 0:
         sample_eeg, sample_targets = dataset[0]
-        print(f"SuS EEG shape: {sample_eeg['ccd_eeg'].shape}")
+        print(f"SuS EEG shape: {sample_eeg['sus_eeg'].shape}")
         print(f"Targets: {list(sample_targets.keys())}")
         print("Challenge 1 dataset test completed successfully!")
     else:
