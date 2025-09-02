@@ -43,6 +43,8 @@ from functools import partial
 import time
 from bids import BIDSLayout
 import mne_bids
+import random
+
 
 # We'll handle boundary events properly instead of ignoring warnings
 
@@ -179,6 +181,9 @@ class Challenge1Dataset(Dataset):
         self.metadata, self.qc_whitelist = self._load_metadata_and_qc()
 
         # Create samples
+
+        self.shortest_sus_segment = 0
+
         self.samples = []
         self._create_samples()
 
@@ -665,6 +670,12 @@ class Challenge1Dataset(Dataset):
                 f"Processing {len(all_subjects)} subjects with {self.max_workers} workers, chunk_size={chunk_size}"
             )
 
+            # print("all_subjects")
+            # print(all_subjects)
+
+            # print("process_func")
+            # print(process_func)
+
             # Use map with chunksize for optimal load balancing
             results = list(
                 executor.map(process_func, all_subjects, chunksize=chunk_size)
@@ -705,7 +716,7 @@ class Challenge1Dataset(Dataset):
         total_time = time.time() - start_time
         logger.info(f"Sequential processing completed in {total_time:.2f}s")
 
-    @staticmethod
+    # @staticmethod
     def _process_single_subject(
         subject_info: Dict,
         filter_params: Dict,
@@ -774,6 +785,7 @@ class Challenge1Dataset(Dataset):
             # # if use_sus_eeg and sus_files:
             sus_eeg_data = None
             if sus_files:
+                # returns 3 pairs of SuS data
                 sus_eeg_data = Challenge1Dataset._load_sus_eeg_data(
                     sus_files, filter_params, resample_freq
                 )
@@ -803,12 +815,28 @@ class Challenge1Dataset(Dataset):
                             ccd_eeg_data, trial, epoch_duration, resample_freq
                         )
 
-                        # hijacked to take in sus data instead as primary
+                        #                       hijacked to take in sus data instead as primary
 
                         if ccd_epoch is not None:
                             # Create sample with CCD EEG as primary input
+                            sus_eeg_list = list(sus_eeg_data)
+                            # trim & concatenate sus_eeg_segments into one length
+                            for i, sus in sus_eeg_list:
+                                if sus.length > self.shortest_sus_segment:
+                                    center = sus.length / 2
+                                    for annot in sus.annotations:
+                                        if annot.lower() == "stim_on":
+                                            center = sus["onset"]
+                                # trim
+                                sus_eeg_list[i] = sus.get_data(
+                                    start=center - self.shortest_sus_segment / 2,
+                                    stop=center + self.shortest_sus_segment / 2,
+                                )
+
+                            concat_sus_eeg_data = np.concatenate(sus_eeg_list, axis=1)
+
                             sample = {
-                                "sus_eeg_data": sus_eeg_data,  # Primary input X1
+                                "sus_eeg_data": concat_sus_eeg_data,  # Primary input X1
                                 "demographics": (
                                     {
                                         "age": age,
@@ -921,7 +949,7 @@ class Challenge1Dataset(Dataset):
 
     """changed"""
 
-    @staticmethod
+    # @staticmethod
     def _load_sus_eeg_data(
         sus_files: List[str], filter_params: Dict, resample_freq: int
     ) -> Optional[np.ndarray]:
@@ -930,6 +958,8 @@ class Challenge1Dataset(Dataset):
             # Collect data from all files
             all_stim_on_data = []
             all_fixpoint_on_data = []
+
+            # record shortest section of SuS data
 
             for sus_file in sus_files:
                 print(f"Debug: Processing SuS file: {sus_file}")
@@ -998,95 +1028,99 @@ class Challenge1Dataset(Dataset):
                     )
                     continue
 
-                # Process annotations for this file
-                stim_on_segments = []
-                fixpoint_segments = []
-
                 # Debug: Print all annotations
-                print(f"Debug: Annotations in {sus_file}:")
-                for i, annot in enumerate(raw.annotations):
-                    print(
-                        f"  {i}: '{annot['description']}' at {annot['onset']}s, duration {annot['duration']}s"
-                    )
+                # print(f"Debug: Annotations in {sus_file}:")
+                # for i, annot in enumerate(raw.annotations):
+                #     print(
+                #         f"  {i}: '{annot['description']}' at {annot['onset']}s, duration {annot['duration']}s"
+                #     )
 
-                # Find all relevant annotations
-                surroundsupp_end = 0
+                """
+                randomly sample 3 potential pairs of stim_on & fixpoint_on per file
+                
+                find the previous end of the previous section (or when "surroundSupp" ... "_start")
+                 - use this for fixpoint_on
+                
+                record the shortest pair
+                
+                trim all sections down across all subjects
+                 - best to do right before returning them all
+                
+                
+                
+                """
+
+                # Process annotations for this file
+                segment1 = []
+                segment2 = []
+                segment3 = []
+
+                notable_annotations = []
+                stim_on_annotations = []
+
+                sampled_indices = []
+                sampled_annots = []
 
                 for annot in raw.annotations:
-                    onset_sample = int(annot["onset"] * raw.info["sfreq"])
-                    duration_samples = int(annot["duration"] * raw.info["sfreq"])
 
-                    # Track end of surroundsupp events
-                    if annot["description"].lower().startswith("surroundsupp"):
-                        surroundsupp_end = onset_sample + duration_samples
-                        print(
-                            f"Debug: Found surroundsupp ending at sample {surroundsupp_end}"
-                        )
+                    if annot["description"].lower().startswith(
+                        "surroundsupp"
+                    ) and annot["description"].lower().endswith("start"):
+                        notable_annotations.append(annot)
 
-                    # Process stim_on events
+                    elif annot["description"].lower() == "fixpoint_on":
+                        notable_annotations.append(annot)
+
                     elif annot["description"].lower() == "stim_on":
-                        print(
-                            f"Debug: Found stim_on at sample {onset_sample}, duration {duration_samples}"
-                        )
+                        notable_annotations.append(annot)
+                        stim_on_annotations.append(annot)
 
-                        # Extract stim_on segment
-                        stim_segment = normalized_data[
-                            :, onset_sample : onset_sample + duration_samples
-                        ]
-                        stim_on_segments.append(stim_segment)
+                    # Check if we have enough annotations
+                    if len(stim_on_annotations) == 0:
+                        print("No STIM_ON annotations found!")
+                        return []
 
-                        # Extract fixpoint segment (from previous event end to current stim_on)
-                        if surroundsupp_end < onset_sample:
-                            fixpoint_segment = normalized_data[
-                                :, surroundsupp_end:onset_sample
-                            ]
-                            if fixpoint_segment.shape[1] > 0:  # Only add if not empty
-                                fixpoint_segments.append(fixpoint_segment)
-                                print(
-                                    f"Debug: Added fixpoint segment of length {fixpoint_segment.shape[1]}"
-                                )
-
-                        # Update surroundsupp_end for next iteration
-                        surroundsupp_end = onset_sample + duration_samples
-
-                # Add segments from this file to the collection
-                if stim_on_segments:
-                    print(
-                        f"Debug: Found {len(stim_on_segments)} stim_on segments in {sus_file}"
+                    # Sample up to 3 (or all if fewer available)
+                    n_to_sample = min(3, len(stim_on_annotations))
+                    sampled_indices = random.sample(
+                        range(len(stim_on_annotations)), n_to_sample
                     )
-                    all_stim_on_data.extend(stim_on_segments)
+                    sampled_annots = [
+                        (i, stim_on_annotations[i]) for i in sampled_indices
+                    ]
 
-                if fixpoint_segments:
                     print(
-                        f"Debug: Found {len(fixpoint_segments)} fixpoint segments in {sus_file}"
+                        f"Found {len(stim_on_annotations)} STIM_ON annotations, sampled {len(sampled_annots)}"
                     )
-                    all_fixpoint_on_data.extend(fixpoint_segments)
 
-            # Concatenate all data from all files
-            concat_stim_on_sus_data = None
-            concat_fixpoint_on_sus_data = None
+                # for each annotation, locate the full segment length
 
-            if all_stim_on_data:
-                concat_stim_on_sus_data = np.concatenate(all_stim_on_data, axis=1)
-                print(
-                    f"Debug: Final stim_on data shape: {concat_stim_on_sus_data.shape}"
-                )
+                for i, annot in sampled_annots:
 
-            if all_fixpoint_on_data:
-                concat_fixpoint_on_sus_data = np.concatenate(
-                    all_fixpoint_on_data, axis=1
-                )
-                print(
-                    f"Debug: Final fixpoint data shape: {concat_fixpoint_on_sus_data.shape}"
-                )
+                    onset = int(annot["onset"] * raw.info["sfreq"])
+                    duration = int(annot["duration"] * raw.info["sfreq"])
 
-            # Return the concatenated data
-            if (
-                concat_stim_on_sus_data is not None
-                and concat_fixpoint_on_sus_data is not None
-            ):
-                print("Debug: Returning both stim_on and fixpoint data")
-                return (concat_stim_on_sus_data, concat_fixpoint_on_sus_data)
+                    # *2+2 to translate from stim_only to all_notable
+                    # *2 to find the end of previous one
+
+                    prev_annot = notable_annotations(sampled_indices(i) * 2)
+                    prev_end = int(prev_annot["onset"] * raw.info["sfreq"]) + int(
+                        prev_annot["duration"] * raw.info["sfreq"]
+                    )
+
+                    segment = raw.get_data(start=prev_end, stop=onset + duration)
+
+                    globals()[f"sample{i+1}"] = segment
+
+                    if segment.length < self.shortest_sus_segment:
+                        self.shortest_sus_segment = segment.length
+
+            segments_with_data = tuple(
+                seg for seg in [segment1, segment2, segment3] if seg
+            )
+
+            if segments_with_data:
+                return segments_with_data
             else:
                 print("Debug: No valid data found, returning None")
                 return None
@@ -1706,7 +1740,7 @@ if __name__ == "__main__":
 
     print("Testing Challenge 1 Dataset (Per-Trial)...")
     dataset = Challenge1Dataset(
-        data_dir="modified_R1sample", config=config, split="train"
+        data_dir="src/data/raw/HBN_BIDS_EEG", config=config, split="train"
     )
 
     print(f"Dataset length: {len(dataset)}")
