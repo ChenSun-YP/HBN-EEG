@@ -818,22 +818,21 @@ class Challenge1Dataset(Dataset):
                         #                       hijacked to take in sus data instead as primary
 
                         if ccd_epoch is not None:
-                            # Create sample with CCD EEG as primary input
-                            sus_eeg_list = list(sus_eeg_data)
+                            # Create sample with SUS EEG as primary input
+
                             # trim & concatenate sus_eeg_segments into one length
-                            for i, sus in sus_eeg_list:
-                                if sus.length > self.shortest_sus_segment:
-                                    center = sus.length / 2
-                                    for annot in sus.annotations:
-                                        if annot.lower() == "stim_on":
-                                            center = sus["onset"]
+                            trimmed_sus_segments = []
+
+                            for i, annot in sus_eeg_data.annotations:
+                                if annot.lower() == "stim_on":
+                                    center = sus["onset"]
                                 # trim
-                                sus_eeg_list[i] = sus.get_data(
+                                trimmed_sus_segments[i] = sus_eeg_data.get_data(
                                     start=center - self.shortest_sus_segment / 2,
                                     stop=center + self.shortest_sus_segment / 2,
                                 )
 
-                            concat_sus_eeg_data = np.concatenate(sus_eeg_list, axis=1)
+                            concat_sus_eeg_data = np.concatenate(trimmed_sus_segments)
 
                             sample = {
                                 "sus_eeg_data": concat_sus_eeg_data,  # Primary input X1
@@ -1115,12 +1114,18 @@ class Challenge1Dataset(Dataset):
                     if segment.length < self.shortest_sus_segment:
                         self.shortest_sus_segment = segment.length
 
-            segments_with_data = tuple(
-                seg for seg in [segment1, segment2, segment3] if seg
-            )
+                # segments_with_data = tuple(
+                #     seg for seg in [segment1, segment2, segment3] if seg
+                # )
 
-            if segments_with_data:
-                return segments_with_data
+                # if segments_with_data:
+                #     return segments_with_data
+
+                # concatenate & return
+                return np.concatenate(
+                    seg for seg in [segment1, segment2, segment3] if seg
+                )
+
             else:
                 print("Debug: No valid data found, returning None")
                 return None
