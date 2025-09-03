@@ -361,8 +361,41 @@ class Challenge1Dataset(Dataset):
         # Use BIDS layout to discover files if available
         if self.layout is not None:
             self._create_samples_with_bids()
+
         else:
             self._create_samples_manual()
+
+        # find shortest length
+        for sample in self.samples:
+            for eeg in sample["sus_eeg_data"]:
+                if self.shortest_sus_segment == 0:
+                    self.shortest_sus_segment = int(len(eeg[0]) * eeg[2])
+                elif int(len(eeg[0]) * eeg[2]) < self.shortest_sus_segment:
+                    self.shortest_sus_segment = int(len(eeg[0]) * eeg[2])
+
+        # trim everything & concatenate
+        for sample in self.samples:
+            # print(f"sample before: {sample["sus_eeg_data"]}")
+            sample_eegs = []
+            i=0
+            half_len = self.shortest_sus_segment // 2
+            print(f"halflen:{half_len}")
+            for eeg in sample["sus_eeg_data"]:
+                center = int(eeg[1])
+                # print(f"center:{center}")
+                start = (center - half_len)
+                # print(f"start:{start}")
+                stop = (start + self.shortest_sus_segment)  # ensure exact length
+                # print(f"stop:{stop}")
+                sample_eegs.append(eeg[0][:,start:stop])
+                # print(f"len:{len(eeg[0])}")
+                # print(f"len:{len(eeg[0][start:stop])}")
+
+                i+=1
+            sample["sus_eeg_data"] = np.concatenate(sample_eegs)
+            # print(f"sample after: {sample["sus_eeg_data"]}")
+                
+
 
     """changed"""
 
@@ -716,7 +749,7 @@ class Challenge1Dataset(Dataset):
         total_time = time.time() - start_time
         logger.info(f"Sequential processing completed in {total_time:.2f}s")
 
-    # @staticmethod
+    @staticmethod
     def _process_single_subject(
         subject_info: Dict,
         filter_params: Dict,
@@ -790,8 +823,8 @@ class Challenge1Dataset(Dataset):
                     sus_files, filter_params, resample_freq
                 )
 
-            print(f"subject sus_files bool: {sus_files}")
-            print(f"subject sus_eeg_data bool: {sus_eeg_data}")
+            # print(f"subject sus_files bool: {sus_files}")
+            # print(f"subject sus_eeg_data bool: {sus_eeg_data}")
 
             for ccd_file in ccd_files:
 
@@ -815,27 +848,27 @@ class Challenge1Dataset(Dataset):
                             ccd_eeg_data, trial, epoch_duration, resample_freq
                         )
 
-                        #                       hijacked to take in sus data instead as primary
+                        # hijacked to take in sus data instead as primary
 
                         if ccd_epoch is not None:
                             # Create sample with SUS EEG as primary input
 
-                            # trim & concatenate sus_eeg_segments into one length
-                            trimmed_sus_segments = []
+                            # # trim & concatenate sus_eeg_segments into one length
+                            # trimmed_sus_segments = []
 
-                            for i, annot in sus_eeg_data.annotations:
-                                if annot.lower() == "stim_on":
-                                    center = sus["onset"]
-                                # trim
-                                trimmed_sus_segments[i] = sus_eeg_data.get_data(
-                                    start=center - self.shortest_sus_segment / 2,
-                                    stop=center + self.shortest_sus_segment / 2,
-                                )
+                            # for i, annot in sus_eeg_data.annotations:
+                            #     if annot.lower() == "stim_on":
+                            #         center = sus["onset"]
+                            #     # trim
+                            #     trimmed_sus_segments[i] = sus_eeg_data.get_data(
+                            #         start=center - self.shortest_sus_segment / 2,
+                            #         stop=center + self.shortest_sus_segment / 2,
+                            #     )
 
-                            concat_sus_eeg_data = np.concatenate(trimmed_sus_segments)
+                            # concat_sus_eeg_data = np.concatenate(trimmed_sus_segments)
 
                             sample = {
-                                "sus_eeg_data": concat_sus_eeg_data,  # Primary input X1
+                                "sus_eeg_data": sus_eeg_data,  # Primary input X1
                                 "demographics": (
                                     {
                                         "age": age,
@@ -948,7 +981,7 @@ class Challenge1Dataset(Dataset):
 
     """changed"""
 
-    # @staticmethod
+    @staticmethod
     def _load_sus_eeg_data(
         sus_files: List[str], filter_params: Dict, resample_freq: int
     ) -> Optional[np.ndarray]:
@@ -1040,19 +1073,10 @@ class Challenge1Dataset(Dataset):
                 find the previous end of the previous section (or when "surroundSupp" ... "_start")
                  - use this for fixpoint_on
                 
-                record the shortest pair
-                
-                trim all sections down across all subjects
-                 - best to do right before returning them all
-                
-                
-                
                 """
 
                 # Process annotations for this file
-                segment1 = []
-                segment2 = []
-                segment3 = []
+                segments_with_data = []
 
                 notable_annotations = []
                 stim_on_annotations = []
@@ -1061,7 +1085,7 @@ class Challenge1Dataset(Dataset):
                 sampled_annots = []
 
                 for annot in raw.annotations:
-
+                    # print(f"annot{annot}")
                     if annot["description"].lower().startswith(
                         "surroundsupp"
                     ) and annot["description"].lower().endswith("start"):
@@ -1074,61 +1098,73 @@ class Challenge1Dataset(Dataset):
                         notable_annotations.append(annot)
                         stim_on_annotations.append(annot)
 
-                    # Check if we have enough annotations
-                    if len(stim_on_annotations) == 0:
-                        print("No STIM_ON annotations found!")
-                        return []
+                # Check if we have enough annotations
+                if len(stim_on_annotations) == 0:
+                    print("No STIM_ON annotations found!")
+                    return []
 
-                    # Sample up to 3 (or all if fewer available)
-                    n_to_sample = min(3, len(stim_on_annotations))
-                    sampled_indices = random.sample(
-                        range(len(stim_on_annotations)), n_to_sample
-                    )
-                    sampled_annots = [
-                        (i, stim_on_annotations[i]) for i in sampled_indices
-                    ]
+                # Sample up to 3 (or all if fewer available)
+                n_to_sample = min(3, len(stim_on_annotations))
+                sampled_indices = random.sample(
+                    range(len(stim_on_annotations)), n_to_sample
+                )
+                sampled_annots = [
+                    (i, stim_on_annotations[i]) for i in sampled_indices
+                ]
 
-                    print(
-                        f"Found {len(stim_on_annotations)} STIM_ON annotations, sampled {len(sampled_annots)}"
-                    )
+                print(
+                    f"Found {len(stim_on_annotations)} STIM_ON annotations, sampled {len(sampled_annots)}"
+                )
 
                 # for each annotation, locate the full segment length
-
-                for i, annot in sampled_annots:
-
+                i = 0
+                for j, annot in sampled_annots:
+                    
                     onset = int(annot["onset"] * raw.info["sfreq"])
                     duration = int(annot["duration"] * raw.info["sfreq"])
 
                     # *2+2 to translate from stim_only to all_notable
                     # *2 to find the end of previous one
-
-                    prev_annot = notable_annotations(sampled_indices(i) * 2)
+                    print(f"j{j}")
+                    prev_annot = notable_annotations[sampled_indices[i] * 2]
+                    # print(f"prev_onset:{prev_annot["onset"]}")
                     prev_end = int(prev_annot["onset"] * raw.info["sfreq"]) + int(
                         prev_annot["duration"] * raw.info["sfreq"]
                     )
+                    i+=1
 
-                    segment = raw.get_data(start=prev_end, stop=onset + duration)
+                    l = onset + duration
+                    
+                    # print(f"segment prev_end{prev_end}")
+                    # print(f"segment stop{l}")
+                    
+                    segment = raw.get_data(start=prev_end, stop=l)
+                    # print(f"segment{segment}")
+                    # locals()[f"sample{i+1}"] = segment
+                    # print (locals()[f"sample{i+1}"])
+                    stim_on_start = (onset - prev_end) * raw.info["sfreq"]
+                    sfreq = raw.info["sfreq"]
+                    segments_with_data.append((segment, stim_on_start, sfreq))
 
-                    globals()[f"sample{i+1}"] = segment
-
-                    if segment.length < self.shortest_sus_segment:
-                        self.shortest_sus_segment = segment.length
+                    # if segment.length < self.shortest_sus_segment:
+                    #     self.shortest_sus_segment = segment.length
 
                 # segments_with_data = tuple(
                 #     seg for seg in [segment1, segment2, segment3] if seg
                 # )
+                # print(f"segments of data{segments_with_data}")
 
-                # if segments_with_data:
-                #     return segments_with_data
+                if segments_with_data:
+                    return segments_with_data
 
                 # concatenate & return
-                return np.concatenate(
-                    seg for seg in [segment1, segment2, segment3] if seg
-                )
+                # return np.concatenate(
+                #     seg for seg in [segment1, segment2, segment3] if seg
+                # )
 
-            else:
-                print("Debug: No valid data found, returning None")
-                return None
+                else:
+                    print("Debug: No valid data found, returning None")
+                    return None
 
         except Exception as e:
             logger.warning(f"Error loading SuS EEG data: {e}")
