@@ -253,18 +253,18 @@ class Challenge1Trainer:
         )
         project_name = self.config["logging"]["project_name"]
 
-        # # WandB logger (if available)
-        # try:
-        #     self.wandb_logger = WandbLogger(
-        #         name=experiment_name,
-        #         project=project_name,
-        #         save_dir="logs",
-        #         config=self.config,
-        #     )
-        #     logger.info("WandB logging initialized")
-        # except Exception as e:
-        #     logger.warning(f"WandB not available: {e}")
-        #     self.wandb_logger = None
+        # WandB logger (if available)
+        try:
+            self.wandb_logger = WandbLogger(
+                name=experiment_name,
+                project=project_name,
+                save_dir="logs",
+                config=self.config,
+            )
+            logger.info("WandB logging initialized")
+        except Exception as e:
+            logger.warning(f"WandB not available: {e}")
+            self.wandb_logger = None
 
         # TensorBoard logger (fallback)
         self.tb_logger = TensorBoardLogger(
@@ -402,14 +402,12 @@ class Challenge1Trainer:
             "log_every_n_steps": self.config["logging"]["log_every_n_steps"],
             "val_check_interval": self.config["validation"]["val_check_interval"],
             "callbacks": callbacks,
-            "logger": [self.tb_logger],
+            "logger": [self.tb_logger] + ([self.wandb_logger] if self.wandb_logger else []),
             "enable_checkpointing": True,
             "enable_progress_bar": True,
             "enable_model_summary": True,
         }
         
-        # + ([self.wandb_logger] if self.wandb_logger else [])
-
         # GPU configuration
         logger.info(f"GPU Info: {self.gpus}")
         logger.info(f"Debug mode: {self.config.get('debug', False)}")
