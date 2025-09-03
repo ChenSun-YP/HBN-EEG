@@ -328,7 +328,9 @@ class CNNEncoder(nn.Module):
             Encoded representation of shape (batch_size, hidden_dim)
         """
         # Temporal convolutions
-        x = F.relu(self.bn1(self.temporal_conv1(x)))
+        x = self.temporal_conv1(x)
+        x = self.bn1(x)
+        x = F.relu(x)
         x = self.dropout(x)
         x = F.relu(self.bn2(self.temporal_conv2(x)))
         x = self.dropout(x)
@@ -370,7 +372,8 @@ class Challenge1Model(pl.LightningModule):
 
         # Model configuration
         model_config = config.get("model", {})
-        encoder_type = model_config.get("encoder_type", "transformer")
+        # encoder_type = model_config.get("encoder_type", "transformer")
+        encoder_type = model_config.get("encoder_type", "cnn")
 
         # Shared encoder (CNN or Transformer)
         if encoder_type == "transformer":
@@ -454,9 +457,7 @@ class Challenge1Model(pl.LightningModule):
         if isinstance(input_features, dict):  # batch,channels,feature dim
             sus_eeg = input_features[
                 "sus_eeg"
-            ]  # now a tuple of two arrays. both must be processed
-            stim_on_sus_eeg = sus_eeg[0]
-            fixpoint_on_sus_eeg = sus_eeg[1]
+            ]  
             demographics = input_features.get("demographics", None)
         else:  # Handle old single-tensor format
             sus_eeg = input_features
@@ -472,26 +473,23 @@ class Challenge1Model(pl.LightningModule):
         # The shared encoder processes ONLY the primary CCD EEG data.
         # Output shape: (batch_size, sequence_length, hidden_dim) for Transformer
         # or (batch_size, hidden_dim) for CNN.
-        stim_on_features = self.shared_encoder(stim_on_sus_eeg.unsqueeze(0)) # unsqueeze to address batch issue?
-        fixpoint_on_features = self.shared_encoder(fixpoint_on_sus_eeg)
+        sus_features = self.shared_encoder(sus_eeg) # unsqueeze to address batch issue?
         
-        abs_diff_features = torch.abs(stim_on_features - fixpoint_on_features)
-
         # Validate shared features
-        if torch.isnan(abs_diff_features).any():
+        if torch.isnan(sus_features).any():
             raise ValueError("NaN detected in shared encoder output!")
-        if torch.isinf(abs_diff_features).any():
+        if torch.isinf(sus_features).any():
             raise ValueError("Inf detected in shared encoder output!")
 
         # 3. Global Pooling
         # To get a single feature vector per trial, we must pool the features
         # over the time/sequence dimension.
-        if abs_diff_features.dim() > 2:
+        if sus_features.dim() > 2:
             pooled_features = torch.mean(
-                abs_diff_features, dim=1
+                sus_features, dim=1
             )  # Shape: (batch_size, hidden_dim)
         else:
-            pooled_features = abs_diff_features  # CNN output is already pooled
+            pooled_features = sus_features  # CNN output is already pooled
 
         # Validate pooled features
         if torch.isnan(pooled_features).any():
@@ -999,7 +997,8 @@ def main():
     print(f"Predicting CCD behavioral outcomes (response time, hit/miss)")
 
     # Test both encoder types
-    for encoder_type in ["cnn", "transformer"]:
+    # for encoder_type in ["cnn", "transformer"]:
+    for encoder_type in ["cnn"]:
         print(f"\n  Testing {encoder_type.upper()} Encoder:")
 
         # Update config for encoder type

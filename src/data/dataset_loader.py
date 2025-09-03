@@ -388,26 +388,28 @@ class Challenge1Dataset(Dataset):
             sample_eegs = []
             i=0
             half_len = self.shortest_sus_segment // 2 - 1 # -1 just to address potential over sized arrays
-            print(f"halflen:{half_len}")
+            # print(f"halflen:{half_len}")
             for eeg in sample["sus_eeg_data"]:
-                print("x shape before trim:", eeg[0].shape)
+                # print("x shape before trim:", eeg[0].shape)
                 
                 center = int(eeg[1])
-                print(f"center:{center}")
+                # print(f"center:{center}")
                 start = (center - half_len)
-                print(f"start:{start}")
+                # print(f"start:{start}")
                 stop = (start + self.shortest_sus_segment)  # ensure exact length
-                print(f"stop:{stop}")
+                # print(f"stop:{stop}")
                 sample_eegs.append(eeg[0][:,start:stop])
-                print(f"len:{len(eeg[0][0,:])}")
-                print(f"len:{len(eeg[0][:,start:stop])}")
+                # print(f"len:{len(eeg[0][0,:])}")
+                # print(f"len:{len(eeg[0][:,start:stop])}")
                 
                 print("segment shape:", eeg[0][:,start:stop].shape, "start:", start, "stop:", stop, "total length:", eeg[0].shape[1])
+                print("sample_eegs shape:", len(sample_eegs), "start:", start, "stop:", stop, "total length:", len(sample_eegs[0]))
                 
                 i+=1
                 
-            sample["sus_eeg_data"] = np.concatenate(sample_eegs)
+            sample["sus_eeg_data"] = np.concatenate(np.array(sample_eegs, dtype=np.float32), axis=1)
             # print(f"sample after: {sample["sus_eeg_data"]}")
+            print(sample["sus_eeg_data"].shape)
                 
 
 
@@ -855,7 +857,7 @@ class Challenge1Dataset(Dataset):
                     # extract array of padded segments
                     # sus_segments = Challenge1Dataset._load_sus_eeg_data(sus_files, filter_params, resample_freq)
 
-                    # Create samples for each sus trial
+                    # Create samples for each ccd trial
                     for trial in ccd_trials:
                         # Extract CCD EEG epoch for this trial
                         ccd_epoch = Challenge1Dataset._extract_ccd_epoch(

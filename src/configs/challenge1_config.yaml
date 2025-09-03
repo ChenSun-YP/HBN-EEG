@@ -30,7 +30,7 @@ model:
   n_channels: 128
   n_times: 512
   hidden_dim: 512
-  encoder_type: transformer
+  encoder_type: cnn
   cnn:
     temporal_filters:
     - 64
