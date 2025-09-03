@@ -474,7 +474,7 @@ class Challenge1Model(pl.LightningModule):
         # The shared encoder processes ONLY the primary CCD EEG data.
         # Output shape: (batch_size, sequence_length, hidden_dim) for Transformer
         # or (batch_size, hidden_dim) for CNN.
-        stim_on_features = self.shared_encoder(stim_on_sus_eeg)
+        stim_on_features = self.shared_encoder(stim_on_sus_eeg.unsqueeze(0)) # unsqueeze to address batch issue?
         fixpoint_on_features = self.shared_encoder(fixpoint_on_sus_eeg)
         
         abs_diff_features = torch.abs(stim_on_features - fixpoint_on_features)
@@ -559,9 +559,9 @@ class Challenge1Model(pl.LightningModule):
         if isinstance(batch[0], dict):
             # New format: (input_features_dict, targets)
             input_features, targets = batch
-            ccd_eeg = input_features["ccd_eeg"]  # Extract primary input
+            ccd_eeg = input_features["sus_eeg"]  # Extract primary input
             optional_features = {
-                k: v for k, v in input_features.items() if k != "ccd_eeg"
+                k: v for k, v in input_features.items() if k != "sus_eeg"
             }
         else:
             # Old format: (eeg_data, targets)
@@ -674,9 +674,9 @@ class Challenge1Model(pl.LightningModule):
         if isinstance(batch[0], dict):
             # New format: (input_features_dict, targets)
             input_features, targets = batch
-            ccd_eeg = input_features["ccd_eeg"]  # Extract primary input
+            ccd_eeg = input_features["sus_eeg"]  # Extract primary input
             optional_features = {
-                k: v for k, v in input_features.items() if k != "ccd_eeg"
+                k: v for k, v in input_features.items() if k != "sus_eeg"
             }
         else:
             # Old format: (eeg_data, targets)
@@ -805,9 +805,9 @@ class Challenge1Model(pl.LightningModule):
         if isinstance(batch[0], dict):
             # New format: (input_features_dict, targets)
             input_features, targets = batch
-            ccd_eeg = input_features["ccd_eeg"]  # Extract primary input
+            ccd_eeg = input_features["sus_eeg"]  # Extract primary input
             optional_features = {
-                k: v for k, v in input_features.items() if k != "ccd_eeg"
+                k: v for k, v in input_features.items() if k != "sus_eeg"
             }
         else:
             # Old format: (eeg_data, targets)

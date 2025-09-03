@@ -379,7 +379,7 @@ class Challenge1Dataset(Dataset):
             sample_eegs = []
             i=0
             half_len = self.shortest_sus_segment // 2
-            print(f"halflen:{half_len}")
+            # print(f"halflen:{half_len}")
             for eeg in sample["sus_eeg_data"]:
                 center = int(eeg[1])
                 # print(f"center:{center}")
@@ -1125,7 +1125,7 @@ class Challenge1Dataset(Dataset):
 
                     # *2+2 to translate from stim_only to all_notable
                     # *2 to find the end of previous one
-                    print(f"j{j}")
+                    # print(f"j{j}")
                     prev_annot = notable_annotations[sampled_indices[i] * 2]
                     # print(f"prev_onset:{prev_annot["onset"]}")
                     prev_end = int(prev_annot["onset"] * raw.info["sfreq"]) + int(
@@ -1788,7 +1788,7 @@ if __name__ == "__main__":
 
     if len(dataset) > 0:
         sample_eeg, sample_targets = dataset[0]
-        print(f"SuS EEG shape: {sample_eeg['sus_eeg'].shape}")
+        print(f"SuS EEG shape: {sample_eeg['sus_eeg_data'].shape}")
         print(f"Targets: {list(sample_targets.keys())}")
         print("Challenge 1 dataset test completed successfully!")
     else:
