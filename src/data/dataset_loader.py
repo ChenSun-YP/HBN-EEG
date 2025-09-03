@@ -368,30 +368,44 @@ class Challenge1Dataset(Dataset):
         # find shortest length
         for sample in self.samples:
             for eeg in sample["sus_eeg_data"]:
+                
+                n_channels, n_timepoints = eeg[0].shape
+    
+                # How far we can extend left and right
+                left = eeg[1]
+                right = n_timepoints - eeg[1] - 1
+                
+                length = min(left,right)
+                
                 if self.shortest_sus_segment == 0:
-                    self.shortest_sus_segment = int(len(eeg[0]) * eeg[2])
+                    self.shortest_sus_segment = length*2
                 elif int(len(eeg[0]) * eeg[2]) < self.shortest_sus_segment:
-                    self.shortest_sus_segment = int(len(eeg[0]) * eeg[2])
+                    self.shortest_sus_segment = length*2
 
         # trim everything & concatenate
         for sample in self.samples:
-            # print(f"sample before: {sample["sus_eeg_data"]}")
+
             sample_eegs = []
             i=0
-            half_len = self.shortest_sus_segment // 2
-            # print(f"halflen:{half_len}")
+            half_len = self.shortest_sus_segment // 2 - 1 # -1 just to address potential over sized arrays
+            print(f"halflen:{half_len}")
             for eeg in sample["sus_eeg_data"]:
+                print("x shape before trim:", eeg[0].shape)
+                
                 center = int(eeg[1])
-                # print(f"center:{center}")
+                print(f"center:{center}")
                 start = (center - half_len)
-                # print(f"start:{start}")
+                print(f"start:{start}")
                 stop = (start + self.shortest_sus_segment)  # ensure exact length
-                # print(f"stop:{stop}")
+                print(f"stop:{stop}")
                 sample_eegs.append(eeg[0][:,start:stop])
-                # print(f"len:{len(eeg[0])}")
-                # print(f"len:{len(eeg[0][start:stop])}")
-
+                print(f"len:{len(eeg[0][0,:])}")
+                print(f"len:{len(eeg[0][:,start:stop])}")
+                
+                print("segment shape:", eeg[0][:,start:stop].shape, "start:", start, "stop:", stop, "total length:", eeg[0].shape[1])
+                
                 i+=1
+                
             sample["sus_eeg_data"] = np.concatenate(sample_eegs)
             # print(f"sample after: {sample["sus_eeg_data"]}")
                 
@@ -1142,7 +1156,7 @@ class Challenge1Dataset(Dataset):
                     # print(f"segment{segment}")
                     # locals()[f"sample{i+1}"] = segment
                     # print (locals()[f"sample{i+1}"])
-                    stim_on_start = (onset - prev_end) * raw.info["sfreq"]
+                    stim_on_start = (onset - prev_end)
                     sfreq = raw.info["sfreq"]
                     segments_with_data.append((segment, stim_on_start, sfreq))
 
@@ -1788,7 +1802,7 @@ if __name__ == "__main__":
 
     if len(dataset) > 0:
         sample_eeg, sample_targets = dataset[0]
-        print(f"SuS EEG shape: {sample_eeg['sus_eeg_data'].shape}")
+        print(f"SuS EEG shape: {sample_eeg['sus_eeg'].shape}")
         print(f"Targets: {list(sample_targets.keys())}")
         print("Challenge 1 dataset test completed successfully!")
     else:
