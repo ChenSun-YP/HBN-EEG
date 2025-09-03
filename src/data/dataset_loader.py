@@ -1556,7 +1556,8 @@ def create_challenge1_dataloaders(
     # train_releases = ["cmi_bids_R1_mini"]
     # val_releases = ["cmi_bids_R1_mini"]
     train_releases = [x for x in available_releases if x != "cmi_bids_R5_mini"]
-    val_releases = ["cmi_bids_R5_mini"]
+    # val_releases = ["cmi_bids_R5_mini"]
+    val_releases = [x for x in available_releases if x != "cmi_bids_R5_mini"]
 
     logger.info(f"Training releases: {train_releases}")
     logger.info(f"Validation releases: {val_releases}")

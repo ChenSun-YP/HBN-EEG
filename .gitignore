@@ -1,4 +1,5 @@
 eegchallenge/
+challenge1_cnn_results.yaml
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

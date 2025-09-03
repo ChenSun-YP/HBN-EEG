@@ -1,2 +1,22 @@
 encoder_type: cnn
+hit_miss_accuracy: 0.9916666666666667
+response_time_mae: 0.5122166872024536
+response_time_r2: -5.51537561416626
+response_time_rmse: !!python/object/apply:numpy._core.multiarray.scalar
+- !!python/object/apply:numpy.dtype
+  args:
+  - f8
+  - false
+  - true
+  state: !!python/tuple
+  - 3
+  - <
+  - null
+  - null
+  - null
+  - -1
+  - -1
+  - 0
+- !!binary |
+  20sab7TK4T8=
 total_parameters: 1400099
